@@ -226,8 +226,9 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 
 `GATE_CONFIG` のファイルを Gate の `LoadConfig` で読み、`FORWARDING_SECRET` を `forwarding.velocitySecret` に差し込んでから起動します。
 次を満たさない設定では起動しません: `lite.enabled: false`、`forwarding.mode: velocity`、ファイルに `velocitySecret` を書かない、
-`servers` に `LOBBY_SERVER` がある、`try` と `forcedHosts` が空、`via.enabled: false`、`api` と `connect` が無効。
-組み込みコマンド (`/server` など) はプラグインが無効にします (他のワールドやロビーへ自分で移れないように)。
+`servers` に `LOBBY_SERVER` がある、`try` と `forcedHosts` が空、`via.enabled: false`、`api` と `connect` が無効、
+`connectionTimeout` / `readTimeout` をナノ秒で書く (下の注意を参照)。
+組み込みコマンド (`/server` など) と BungeeCord の plugin message はプラグインが無効にします (他のワールドやロビーへ自分で移れないように)。
 
 ```yaml
 config:
@@ -242,6 +243,9 @@ config:
   try: []                 # 振り分けはプラグインが行う
   lite:
     enabled: false
+  # ナノ秒で書く (Gate が使う所で time.Millisecond 倍して 5 秒 / 30 秒になる。下の注意を参照)
+  connectionTimeout: 5000ns
+  readTimeout: 30000ns
   status:
     showMaxPlayers: 20
 ```
@@ -249,14 +253,25 @@ config:
 `config.quota` (接続 5 回/秒・ログイン 0.4 回/秒、IP ごと) は既定で有効で、PROXY protocol で渡された実際のクライアント IP に掛かります。
 
 > [!WARNING]
-> **Gate v0.74.32 の classic モードの `connectionTimeout` / `readTimeout` は効きません。**
-> `configutil.Duration` は既にナノ秒の `time.Duration` なのに、`time.Duration(cfg.ConnectionTimeout)*time.Millisecond` のように
-> もう一度 `time.Millisecond` を掛けている箇所があり (`pkg/edition/java/proxy/proxy.go` の `withConnectionTimeout` とクライアント接続の
-> 読み書きの期限、`switch.go` のキック後のリダイレクト)、`5s` が約 58 日、`30s` が約 8 時間になります。
-> このためプラグインはワールドへの接続に必ず自分の期限 (15 秒) を掛け、Gate の値には頼りません。
-> Gate が自分で掛ける接続 (起動済みのワールドへの最初の接続・ロビーへの接続・キック後のロビーへのリダイレクト) は実質期限なしなので、
-> 接続先がパケットを捨てる (応答しない) と止まったままになります。ワールドは API が ping で確かめてから `ready` にし、
-> ロビーとワールドは同じ namespace の ClusterIP (落ちていれば Cilium が即座に reject) なので、通常は問題になりません。
+> **Gate v0.74.32 の classic モードは `connectionTimeout` / `readTimeout` を二重に `time.Millisecond` 倍します。**
+> `configutil.Duration` は既にナノ秒の `time.Duration` なのに、使う所で `time.Duration(cfg.ConnectionTimeout)*time.Millisecond` のように
+> もう一度 `time.Millisecond` を掛けています (`pkg/edition/java/proxy/proxy.go` の `withConnectionTimeout` (Mojang の認証にも使う) と
+> クライアント接続の読み書きの期限、`server.go` のバックエンド接続の読み書きの期限、`switch.go` のキック後のリダイレクト)。
+> さらに `LoadConfig` は既定値を JSON 経由で読み直す際にナノ秒の数値をミリ秒として読むので、既定の `5s` / `30s` は約 1388 時間 / 8333 時間になり、
+> 使う所で掛け算が int64 を桁あふれして約 10791 日 / 64747 日 (実質無期限) になります。
+> 放っておくと、パケットを捨てる (応答しない) バックエンドへの接続でプレイヤーが止まったままになり、handshake だけ送って黙るクライアントは
+> HAProxy の `timeout client` (1 時間) まで残ります。
+>
+> そこで設定には **ナノ秒で** `connectionTimeout: 5000ns` / `readTimeout: 30000ns` と書きます (Gate が使う所で 1000 倍されて 5 秒 / 30 秒)。
+> proxy は Gate が掛けた後の実効値が 1 秒〜10 分に収まらない設定 (省略して既定のまま・`5s` や `5000` と書いた等) では起動しません。
+> 副作用が 2 つあり、proxy が対処しています:
+>
+> - BungeeCord の plugin message の `Connect` (`bungee.go`) は値を倍さずに使い 5µs で必ず失敗するので、`bungeePluginChannelEnabled` を
+>   proxy が無効にします (ワールドもロビーも使わない。組み込みコマンドと同じく、勝手にサーバーを移れないようにする意味もあります)。
+> - `reportSilentBackendAfterReadTimeout` (ログだけ) も値を倍さずに使い、30µs で「backend server has not sent a single packet since the
+>   connection was established」をバックエンドへのログインごとに 1 回 Error で出すので、proxy がこのメッセージだけ Gate のログから落とします。
+>
+> プラグインがワールドへ移す接続には、これとは別に自分の期限 (15 秒) を掛けています。
 
 ### ビルドタグ `musl`
 

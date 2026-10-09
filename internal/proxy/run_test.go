@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.minekube.com/common/minecraft/component"
 	jconfig "go.minekube.com/gate/pkg/edition/java/config"
@@ -21,6 +23,8 @@ const goodConfig = `config:
   try: []
   lite:
     enabled: false
+  connectionTimeout: 5000ns
+  readTimeout: 30000ns
 `
 
 func writeConfig(t *testing.T, body string) string {
@@ -48,6 +52,16 @@ func TestLoadGateConfig(t *testing.T) {
 	if c.Servers["lobby"] != "lobby.worlds.svc.cluster.local:25565" {
 		t.Fatalf("servers = %v", c.Servers)
 	}
+	if c.BungeePluginChannelEnabled {
+		t.Fatal("bungee plugin channel left enabled")
+	}
+	// Gate が使う所で time.Millisecond 倍されて 5 秒 / 30 秒になる
+	if got := effectiveGateTimeout(time.Duration(c.ConnectionTimeout)); got != 5*time.Second {
+		t.Fatalf("effective connectionTimeout = %s", got)
+	}
+	if got := effectiveGateTimeout(time.Duration(c.ReadTimeout)); got != 30*time.Second {
+		t.Fatalf("effective readTimeout = %s", got)
+	}
 	if _, errs := cfg.Validate(); len(errs) != 0 {
 		t.Fatalf("validate: %v", errs)
 	}
@@ -64,6 +78,11 @@ func TestLoadGateConfigRejects(t *testing.T) {
 		{"no lobby", strings.Replace(goodConfig, "lobby:", "hub:", 1), "s", `lobby "lobby"`},
 		{"try", strings.Replace(goodConfig, "try: []", "try: [lobby]", 1), "s", "try"},
 		{"via", goodConfig + "  via:\n    enabled: true\n", "s", "via.enabled"},
+		// 省略すると Gate の既定 (5s / 30s) になり、ミリ秒倍されて実質無期限
+		{"default timeouts", strings.Replace(strings.Replace(goodConfig, "  connectionTimeout: 5000ns\n", "", 1), "  readTimeout: 30000ns\n", "", 1), "s", "connectionTimeout must be written in nanoseconds"},
+		{"timeout in seconds", strings.Replace(goodConfig, "readTimeout: 30000ns", "readTimeout: 30s", 1), "s", "readTimeout must be written in nanoseconds"},
+		{"timeout in millis", strings.Replace(goodConfig, "connectionTimeout: 5000ns", "connectionTimeout: 5000", 1), "s", "connectionTimeout must be written in nanoseconds"},
+		{"timeout too short", strings.Replace(goodConfig, "connectionTimeout: 5000ns", "connectionTimeout: 5ns", 1), "s", "connectionTimeout is too short"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,5 +113,19 @@ func TestPlainText(t *testing.T) {
 	}
 	if plainText(nil) != "" {
 		t.Fatal("nil")
+	}
+}
+
+func TestGateLogFilter(t *testing.T) {
+	var buf strings.Builder
+	h := gateLogFilter{slog.NewTextHandler(&buf, nil)}
+	log := slog.New(h).With("component", "gate").WithGroup("g")
+	log.Error(silentBackendMsg, "backend", "lobby")
+	log.Error("backend server never answered: the backend connection ended without it sending a single packet")
+	if strings.Contains(buf.String(), silentBackendMsg) {
+		t.Fatalf("silent backend log not filtered: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "never answered") {
+		t.Fatalf("other logs dropped: %q", buf.String())
 	}
 }

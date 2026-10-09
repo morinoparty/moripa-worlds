@@ -14,6 +14,9 @@ config:
   try: []
   lite:
     enabled: false
+  # 本番と同じ。Gate v0.74.32 は使う所でもう一度 time.Millisecond 倍するので、ナノ秒で書いて 5 秒 / 30 秒にする
+  connectionTimeout: 5000ns
+  readTimeout: 30000ns
   quota:
     connections:
       enabled: false
