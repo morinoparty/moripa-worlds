@@ -54,7 +54,9 @@ docker run -d --name mwe2e-ctl --network $NET --network-alias moripa-worlds \
 	-e API_TOKEN=$TOKEN -v "$WORK/bin/devcontroller:/devcontroller:ro" --entrypoint /devcontroller \
 	gcr.io/distroless/static-debian12:nonroot -listen :8080 -address world:25565 -ready-after "$READY_AFTER" \
 	-world "$W1=テストワールド,$W2=ねむっているワールド" >/dev/null
+# 本番と同じく読み取り専用のルート FS・nonroot で動かす (書き込める場所が要らないことも確かめる)
 docker run -d --name mwe2e-gate --network $NET -p 127.0.0.1:$PORT:25565 -p 127.0.0.1:38080:8080 \
+	--read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
 	-e FORWARDING_SECRET=$SECRET -e API_TOKEN=$TOKEN -e API_URL=http://moripa-worlds:8080 \
 	-e GATE_CONFIG=/etc/gate/config.yml -e STARTUP_WAIT=2m \
 	-v "$ROOT/hack/e2e/config.yml:/etc/gate/config.yml:ro" "$IMAGE" proxy >/dev/null
