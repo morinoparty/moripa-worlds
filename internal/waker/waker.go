@@ -1,6 +1,9 @@
 // Package waker は Gate Lite から転送されてきた Minecraft の接続を受け、
-// 対象のワールドを起動 (Kubernetes に作成) してから、
-// サーバーリストには「起動中」の MOTD、ログインには再接続を促す切断メッセージを返す。
+// ログインなら対象のワールドを起動 (Kubernetes に作成) して再接続を促す切断メッセージを返し、
+// サーバーリストの ping には「停止中 (参加すると起動)」または「起動中」の MOTD を返す。
+//
+// ping ではワールドを作らない。ping は認証なしで送れるため、ping で作ると
+// 参加されないワールドで MAX_WORLDS の枠を埋め続けられてしまう。
 //
 // Gate はワールド w-<uuid> に接続できなかったとき (未起動・起動中) だけこの waker に接続を回す。
 package waker
@@ -27,6 +30,7 @@ const (
 	MsgNotFound      = "ワールドが見つかりません"
 	MsgBusy          = "現在混み合っています。しばらくしてから再接続してください"
 	MsgStartingLogin = "ワールドを起動しています。10〜30秒後に再接続してください"
+	MsgSleeping      = "停止中です。参加すると起動します"
 	MsgError         = "ワールドを起動できませんでした。しばらくしてから再接続してください"
 )
 
@@ -47,6 +51,8 @@ type InfoStore interface {
 // WorldEnsurer はワールドを (なければ) 作る。
 type WorldEnsurer interface {
 	Ensure(ctx context.Context, info *schematic.Info) (world.EnsureResult, error)
+	// Exists はワールドが既にある (起動中) かをキャッシュから返す。API を叩かないこと。
+	Exists(id string) bool
 }
 
 // Server は waker の TCP サーバー。
@@ -178,7 +184,7 @@ func (s *Server) Handle(ctx context.Context, conn net.Conn) {
 		}
 	}
 
-	o := s.resolve(ctx, hs.ServerAddress, log)
+	o := s.resolve(ctx, hs.ServerAddress, hs.IsLogin(), log)
 	s.Metrics.Connection(state, o.result)
 	log.Info("handled connection", "id", o.id, "result", o.result)
 
@@ -200,8 +206,8 @@ func (s *Server) Handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// resolve はホスト名からワールドを探し、必要なら作成する。
-func (s *Server) resolve(ctx context.Context, addr string, log *slog.Logger) outcome {
+// resolve はホスト名からワールドを探す。create (ログイン) のときだけ、なければ作成する。
+func (s *Server) resolve(ctx context.Context, addr string, create bool, log *slog.Logger) outcome {
 	id, err := worldid.FromHost(addr, s.HostSuffix)
 	if err != nil {
 		label := worldid.CleanHost(addr)
@@ -222,6 +228,13 @@ func (s *Server) resolve(ctx context.Context, addr string, log *slog.Logger) out
 	}
 	if info.Expired(s.now()) {
 		return outcome{result: "not_found", id: id, label: id}
+	}
+	if !create {
+		// ステータス ping では作らない (認証なしで枠を埋められないように)。
+		if s.Worlds.Exists(id) {
+			return outcome{result: "starting", id: id, label: id, info: info}
+		}
+		return outcome{result: "sleeping", id: id, label: id, info: info}
 	}
 	res, err := s.Worlds.Ensure(ctx, info)
 	if err != nil {
@@ -260,6 +273,10 @@ func statusResponse(o outcome, protocol int32) mcproto.StatusResponse {
 	switch o.result {
 	case "created", "starting":
 		r.Description = mcproto.Text{Text: sprintfTitle(o.info.DisplayTitle())}
+	case "sleeping":
+		r.Version.Name = "sleeping"
+		// 2 行の MOTD: 1 行目にタイトル、2 行目に案内。
+		r.Description = mcproto.Text{Text: o.info.DisplayTitle() + "\n" + MsgSleeping}
 	case "busy":
 		r.Version.Name = "busy"
 		r.Description = mcproto.Text{Text: MsgBusy, Color: "gold"}

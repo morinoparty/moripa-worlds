@@ -133,6 +133,38 @@ func TestEnsureRateLimited(t *testing.T) {
 	}
 }
 
+// TestEnsureBusyWithoutAPICalls は、満杯・レート制限のときに API を叩かず (ロックも取らず) 断ることを確かめる。
+func TestEnsureBusyWithoutAPICalls(t *testing.T) {
+	ctx := context.Background()
+	full := []runtime.Object{deployment(id1, time.Now(), true, nil), deployment(id2, time.Now(), true, nil)}
+	m, cs := newManager(t, full...)
+	cs.ClearActions()
+	if res, err := m.Ensure(ctx, infoWithID(id3)); err != nil || res != Full {
+		t.Fatalf("Ensure when full = %v, %v", res, err)
+	}
+	if a := cs.Actions(); len(a) != 0 {
+		t.Fatalf("API called when full: %v", a)
+	}
+
+	m, cs = newManager(t)
+	m.Limiter = rate.NewLimiter(rate.Every(time.Hour), 1)
+	m.Limiter.Allow()
+	cs.ClearActions()
+	if res, err := m.Ensure(ctx, infoWithID(id1)); err != nil || res != RateLimited {
+		t.Fatalf("Ensure when rate limited = %v, %v", res, err)
+	}
+	if a := cs.Actions(); len(a) != 0 {
+		t.Fatalf("API called when rate limited: %v", a)
+	}
+}
+
+func TestExists(t *testing.T) {
+	m, _ := newManager(t, deployment(id1, time.Now(), false, nil))
+	if !m.Exists(id1) || m.Exists(id2) {
+		t.Fatal("Exists mismatch")
+	}
+}
+
 func TestEnsureRollsBackOnChildFailure(t *testing.T) {
 	m, cs := newManager(t)
 	cs.PrependReactor("create", "services", func(k8stesting.Action) (bool, runtime.Object, error) {

@@ -168,12 +168,13 @@ func run() error {
 	})
 
 	reaper := &world.Reaper{
-		Manager:        manager,
-		Store:          store,
-		StartupTimeout: cfg.StartupTimeout,
-		IdleTimeout:    cfg.IdleTimeout,
-		Log:            log.With("component", "reaper"),
-		Metrics:        m,
+		Manager:         manager,
+		Store:           store,
+		StartupTimeout:  cfg.StartupTimeout,
+		IdleTimeout:     cfg.IdleTimeout,
+		UnjoinedTimeout: cfg.UnjoinedTimeout,
+		Log:             log.With("component", "reaper"),
+		Metrics:         m,
 		Ping: func(ctx context.Context, addr string) (int, error) {
 			r, err := mcproto.Ping(ctx, addr, statusPingTimeout)
 			return r.Online, err

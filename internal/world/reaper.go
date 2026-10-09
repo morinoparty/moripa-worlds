@@ -23,6 +23,7 @@ import (
 // 削除理由 (worlds_reaped_total の reason ラベル)。
 const (
 	ReasonIdle             = "idle"
+	ReasonUnjoined         = "unjoined"
 	ReasonStartupTimeout   = "startup_timeout"
 	ReasonSchematicMissing = "schematic_missing"
 	ReasonExpired          = "expired"
@@ -44,9 +45,12 @@ type Reaper struct {
 	Ping           Pinger
 	StartupTimeout time.Duration
 	IdleTimeout    time.Duration
-	Now            func() time.Time
-	Log            *slog.Logger
-	Metrics        *metrics.Metrics
+	// UnjoinedTimeout は一度もプレイヤーが入っていないワールドを片付けるまでの時間。
+	// 0 なら IdleTimeout と同じ。参加されないワールドが MAX_WORLDS の枠を長く占めないようにする。
+	UnjoinedTimeout time.Duration
+	Now             func() time.Time
+	Log             *slog.Logger
+	Metrics         *metrics.Metrics
 }
 
 // Run は interval ごとに ReapOnce を呼ぶ。
@@ -142,12 +146,21 @@ func (r *Reaper) check(ctx context.Context, d *appsv1.Deployment) string {
 		log.Debug("status ping failed", "addr", addr, "error", err)
 	}
 	last := LastActive(d)
+	played := Played(d)
 	if err == nil && online > 0 {
-		// アノテーションの書き込みは 1 分に 1 回まで。
-		if now.Sub(last) >= time.Minute {
+		// アノテーションの書き込みは 1 分に 1 回まで。ただし初めてプレイヤーを見たときはすぐ記録する。
+		if !played || now.Sub(last) >= time.Minute {
 			if perr := r.markActive(ctx, d, now); perr != nil {
 				log.Warn("failed to record last-active", "error", perr)
 			}
+		}
+		return ""
+	}
+	if !played && r.UnjoinedTimeout > 0 && r.UnjoinedTimeout < r.IdleTimeout {
+		// 起動 (Ready) してから誰も入っていない。
+		if now.Sub(last) >= r.UnjoinedTimeout {
+			log.Info("world was never joined", "since", last)
+			return r.reap(ctx, log, id, ReasonUnjoined)
 		}
 		return ""
 	}
@@ -171,7 +184,10 @@ func (r *Reaper) reap(ctx context.Context, log *slog.Logger, id, reason string) 
 func (r *Reaper) markActive(ctx context.Context, d *appsv1.Deployment, now time.Time) error {
 	patch, _ := json.Marshal(map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{AnnotationLastActive: now.UTC().Format(time.RFC3339)},
+			"annotations": map[string]string{
+				AnnotationLastActive: now.UTC().Format(time.RFC3339),
+				AnnotationPlayed:     "true",
+			},
 		},
 	})
 	_, err := r.Manager.Client.AppsV1().Deployments(d.Namespace).Patch(ctx, d.Name, types.MergePatchType, patch, metav1.PatchOptions{})
@@ -200,6 +216,11 @@ func notReadySince(d *appsv1.Deployment) time.Time {
 		since = c.LastTransitionTime.Time
 	}
 	return since
+}
+
+// Played は一度でもプレイヤーがいたワールドかどうかを返す。
+func Played(d *appsv1.Deployment) bool {
+	return d.Annotations[AnnotationPlayed] == "true"
 }
 
 // LastActive はアイドル判定の基準時刻を返す。

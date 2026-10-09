@@ -30,6 +30,7 @@ func (m memStore) Get(_ context.Context, id string) (*schematic.Info, error) {
 }
 
 // logWorlds は最初の Ensure で Created、以降は Existing を返し、呼ばれたことをログに出す。
+// Exists は一度 Ensure された ID で true を返す。
 type logWorlds struct {
 	mu      sync.Mutex
 	created map[string]bool
@@ -46,6 +47,12 @@ func (l *logWorlds) Ensure(_ context.Context, info *schematic.Info) (world.Ensur
 	l.created[info.ID] = true
 	l.log.Info("ensure: created", "id", info.ID)
 	return world.Created, nil
+}
+
+func (l *logWorlds) Exists(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.created[id]
 }
 
 func main() {

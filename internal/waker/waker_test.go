@@ -40,10 +40,17 @@ func (f *fakeStore) Get(_ context.Context, id string) (*schematic.Info, error) {
 }
 
 type fakeWorlds struct {
-	mu     sync.Mutex
-	calls  []string
-	result world.EnsureResult
-	err    error
+	mu       sync.Mutex
+	calls    []string
+	existing map[string]bool
+	result   world.EnsureResult
+	err      error
+}
+
+func (f *fakeWorlds) Exists(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.existing[id]
 }
 
 func (f *fakeWorlds) Ensure(_ context.Context, info *schematic.Info) (world.EnsureResult, error) {
@@ -158,21 +165,36 @@ func loginOf(t *testing.T, s *Server, host string, next int32) mcproto.Text {
 	return txt
 }
 
-func TestStatusStartsWorld(t *testing.T) {
-	w := &fakeWorlds{result: world.Created}
-	s := newServer(w, knownStore())
-	resp := statusOf(t, s, strings.ToUpper(knownID)+suffix+"\x00FML3\x00")
-	if resp.Description.Text != "ロビーの噴水 を起動しています…" {
-		t.Errorf("motd = %q", resp.Description.Text)
+// TestStatusDoesNotStartWorld はステータス ping ではワールドを作らないことを確かめる
+// (認証なしの ping で MAX_WORLDS の枠を埋められないように)。
+func TestStatusDoesNotStartWorld(t *testing.T) {
+	for _, res := range []world.EnsureResult{world.Created, world.Full, world.RateLimited} {
+		w := &fakeWorlds{result: res}
+		s := newServer(w, knownStore())
+		resp := statusOf(t, s, strings.ToUpper(knownID)+suffix+"\x00FML3\x00")
+		if resp.Description.Text != "ロビーの噴水\n"+MsgSleeping {
+			t.Errorf("%v: motd = %q", res, resp.Description.Text)
+		}
+		if resp.Version.Name != "sleeping" || resp.Version.Protocol != 773 {
+			t.Errorf("%v: version = %+v", res, resp.Version)
+		}
+		if resp.Players.Max != 20 || resp.Players.Online != 0 {
+			t.Errorf("%v: players = %+v", res, resp.Players)
+		}
+		if got := w.Calls(); len(got) != 0 {
+			t.Errorf("%v: ensure must not be called on status: %v", res, got)
+		}
 	}
-	if resp.Version.Name != "starting" || resp.Version.Protocol != 773 {
-		t.Errorf("version = %+v", resp.Version)
+}
+
+func TestStatusStartingWorld(t *testing.T) {
+	w := &fakeWorlds{result: world.Created, existing: map[string]bool{knownID: true}}
+	resp := statusOf(t, newServer(w, knownStore()), knownID+suffix)
+	if resp.Description.Text != "ロビーの噴水 を起動しています…" || resp.Version.Name != "starting" {
+		t.Errorf("status = %+v", resp)
 	}
-	if resp.Players.Max != 20 || resp.Players.Online != 0 {
-		t.Errorf("players = %+v", resp.Players)
-	}
-	if got := w.Calls(); len(got) != 1 || got[0] != knownID {
-		t.Errorf("ensure calls = %v", got)
+	if got := w.Calls(); len(got) != 0 {
+		t.Errorf("ensure must not be called on status: %v", got)
 	}
 }
 
@@ -209,11 +231,11 @@ func TestStatusExpiredWorld(t *testing.T) {
 	}
 }
 
-func TestStatusBusy(t *testing.T) {
+func TestLoginBusy(t *testing.T) {
 	for _, res := range []world.EnsureResult{world.Full, world.RateLimited} {
-		resp := statusOf(t, newServer(&fakeWorlds{result: res}, knownStore()), knownID+suffix)
-		if resp.Description.Text != MsgBusy {
-			t.Errorf("%v: motd = %q", res, resp.Description.Text)
+		txt := loginOf(t, newServer(&fakeWorlds{result: res}, knownStore()), knownID+suffix, mcproto.NextStateLogin)
+		if txt.Text != MsgBusy {
+			t.Errorf("%v: disconnect = %q", res, txt.Text)
 		}
 	}
 }
@@ -323,10 +345,13 @@ func TestServeRealListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	js, _ := mcproto.ParseString(p, 0, mcproto.MaxStatusResponseLen)
-	if !strings.Contains(js, "を起動しています") {
+	if !strings.Contains(js, MsgSleeping) {
 		t.Fatalf("status = %s", js)
 	}
 	_ = conn.Close()
+	if len(w.Calls()) != 0 {
+		t.Fatalf("ensure called on status: %v", w.Calls())
+	}
 
 	// mcproto.Ping はホスト 127.0.0.1 で接続するので「見つかりません」になるが、プロトコルとしては成功する。
 	r, err := mcproto.Ping(context.Background(), ln.Addr().String(), 2*time.Second)

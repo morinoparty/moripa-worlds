@@ -5,7 +5,7 @@ Minecraft で `<uuidv7>.world.site1.dev.morino.party` に接続するだけで�
 
 - 接続先のホスト名に含まれる schematic ID (UUID v7) から `schematics/<ID>/info.json` を探し、
   [ianua-silvae](https://github.com/morinoparty/ianua-silvae) (Minestom 製の軽量サーバー) のワールドを Kubernetes 上に作ります。
-- サーバーリストの ping でもワールドが起動します。起動中は MOTD で「起動しています…」と表示し、ログインには再接続を促します。
+- ワールドはログイン (参加) したときに起動し、再接続を促します。サーバーリストの ping では起動せず、MOTD で「停止中です。参加すると起動します」(起動中なら「起動しています…」) と表示します。
 - 誰もいなくなったワールド・起動しないワールド・schematic が消えたワールドは自動で片付けます。
 - `info.json` の `delete_at` を過ぎた schematic は S3 から削除します (MoripaUtils 自身は削除しないため)。
 
@@ -27,7 +27,7 @@ flowchart LR
 
 1. Gate Lite はホスト名の `*` を `$1` として取り出し、`w-$1.worlds.svc.cluster.local:25565` → `moripa-worlds.worlds.svc.cluster.local:25565` の順に接続を試みます (`strategy: sequential`)。
 2. ワールドが動いていなければ Service がない (NXDOMAIN) か、エンドポイントがなく Cilium が reject するので、接続は moripa-worlds (waker) に落ちます。
-3. waker はワールドを作成し、MOTD / 切断メッセージを返します。10〜30 秒後に再接続すると、今度は ① でワールドに直接繋がります。
+3. waker はログインならワールドを作成して切断メッセージを返し、ステータス ping なら作成せずに MOTD を返します。10〜30 秒後に再接続すると、今度は ① でワールドに直接繋がります。
 
 ### ワールドの起動 (waker)
 
@@ -37,13 +37,20 @@ flowchart LR
 2. `<id><WORLD_HOST_SUFFIX>` の `<id>` が小文字の正規形 UUID (version 7・variant 10) でなければ「見つかりません」。
 3. `S3_PREFIX<id>/info.json` を GetObject で読みます (見つかった結果は 30 秒、見つからなかった結果は 10 秒キャッシュ。同じ ID への同時問い合わせは 1 回にまとめます)。
    ない・不正・`delete_at` を過ぎている場合は「見つかりません」。
-4. ワールドがなければ作ります。`MAX_WORLDS` に達している、または作成のレート制限 (全体で 10 回/分) に掛かった場合は「混み合っています」。
+4. ステータス ping (next state 1) ならワールドは作りません。informer のキャッシュにワールドがあれば「起動しています…」、なければ「停止中」と返します (API は叩きません)。
+5. ログインならワールドがなければ作ります。`MAX_WORLDS` に達している、または作成のレート制限 (全体で 10 回/分) に掛かった場合は「混み合っています」。
+   満杯・レート制限の判定はまず informer のキャッシュとトークン数で行い、そこで断る場合は API もロックも使いません。
+
+ping でワールドを作らないのは、ping が認証 (Mojang アカウント) なしで送れるためです。ping で作ると、知っている (共有された、または自分でアップロードした) ID に
+数分おきに ping するだけで `MAX_WORLDS` の枠を埋め続け、ほかのプレイヤーを「混み合っています」で締め出せてしまいます。
+waker からはクライアントの IP が見えない (Gate は backend に PROXY protocol を送らない) ので、IP ごとの制限では防げません。
 
 | 状況 | サーバーリスト (MOTD) | ログイン (切断メッセージ) |
 | --- | --- | --- |
+| 停止中 (ping のみ) | `<title>` + 改行 + `停止中です。参加すると起動します` (version 名 `sleeping`) | (ログインでは起動するので該当なし) |
 | 起動した / 起動中 | `<title> を起動しています…` (version 名 `starting`、プロトコル番号はクライアントのものを返すので互換ありと表示) | `ワールドを起動しています。10〜30秒後に再接続してください` |
 | 見つからない | `ワールドが見つかりません` (赤) | `ワールドが見つかりません: <id>` (赤) |
-| 上限・レート制限 | `現在混み合っています。しばらくしてから再接続してください` | 同左 |
+| 上限・レート制限 | (ping では起動しないので該当なし) | `現在混み合っています。しばらくしてから再接続してください` |
 | S3 / Kubernetes のエラー | `ワールドを起動できませんでした。しばらくしてから再接続してください` (赤) | 同左 |
 
 人数は `0/20` を返します。Ping Request には Pong を返します (Gate Lite は Pong を自分で返すので、直接接続したときだけ使われます)。
@@ -65,7 +72,8 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
 - **Deployment** (replicas 1、Recreate): `WORLD_IMAGE` を UID/GID 10001・readOnlyRootFilesystem・capabilities なし・seccomp RuntimeDefault で動かします。
   PVC `WORLD_SCHEMATICS_PVC` を `/schematics` に読み取り専用で、ConfigMap を `/server/config` に、emptyDir を `/tmp` にマウントします。
   initContainer (`busybox:1.37`) が schematic 本体が見えるまで最大 120 秒待ちます (geesefs は一覧を ~10 秒キャッシュするため)。
-  ServiceAccount トークンと Service リンクの環境変数は渡しません。`worlds.morino.party/last-active` アノテーションに最後にプレイヤーがいた時刻を記録します。
+  ServiceAccount トークンと Service リンクの環境変数は渡しません。`worlds.morino.party/last-active` アノテーションに最後にプレイヤーがいた時刻を、
+  `worlds.morino.party/played=true` アノテーションに一度でもプレイヤーがいたことを記録します。
 - **Service** (ClusterIP、`25565/TCP` 名前 `minecraft`)。
 
 ### ワールドの片付け (reaper)
@@ -76,6 +84,7 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
 | --- | --- |
 | `startup_timeout` | 作成 (または Available=False になって) から `STARTUP_TIMEOUT` 経っても Ready にならない |
 | `idle` | Ready なワールドにステータス ping (`w-<uuid>.<ns>.svc:25565`) して `players.online` が 0 のまま `IDLE_TIMEOUT` 経った。最後にプレイヤーがいた時刻はアノテーションに残すので、コントローラーが再起動しても引き継ぎます |
+| `unjoined` | Ready になってから一度もプレイヤーがいないまま `UNJOINED_TIMEOUT` 経った (`played` アノテーションがない)。参加されないワールドが枠を長く占めないようにするため |
 | `schematic_missing` | info.json が消えた |
 | `expired` | `delete_at` を過ぎた |
 
@@ -122,6 +131,7 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 | `WORLD_MEMORY_REQUEST` / `WORLD_MEMORY_LIMIT` | `384Mi` / `768Mi` | ワールドのメモリ |
 | `MAX_WORLDS` | `6` | 同時に存在できるワールドの数 (既存の `w-*` Deployment を数える) |
 | `IDLE_TIMEOUT` | `10m` | 0 人のまま経ったら削除するまでの時間 |
+| `UNJOINED_TIMEOUT` | `3m` | 一度もプレイヤーが入らないまま (Ready から) 経ったら削除するまでの時間。`IDLE_TIMEOUT` 以上なら `IDLE_TIMEOUT` と同じ扱い |
 | `STARTUP_TIMEOUT` | `3m` | Ready にならなかったら削除するまでの時間 |
 | `SWEEP_INTERVAL` | `1h` | sweeper の間隔 |
 | `DELETE_EXPIRED` | `true` | sweeper を動かすか |
@@ -186,9 +196,9 @@ config:
 | 名前 | 種類 | ラベル |
 | --- | --- | --- |
 | `worlds_running` | gauge | 現在のワールド (管理対象 Deployment) の数 |
-| `waker_connections_total` | counter | `state` (`status` / `login` / `unknown`)、`result` (`created` / `starting` / `not_found` / `busy` / `error` / `bad_request`) |
+| `waker_connections_total` | counter | `state` (`status` / `login` / `unknown`)、`result` (`created` / `starting` / `sleeping` / `not_found` / `busy` / `error` / `bad_request`) |
 | `worlds_created_total` | counter | |
-| `worlds_reaped_total` | counter | `reason` (`idle` / `startup_timeout` / `schematic_missing` / `expired` / `swept`) |
+| `worlds_reaped_total` | counter | `reason` (`idle` / `unjoined` / `startup_timeout` / `schematic_missing` / `expired` / `swept`) |
 | `schematics_swept_total` | counter | |
 
 `/readyz` は Deployment の informer が同期済みで、S3 に ListObjectsV2 できるときだけ 200 を返します。
@@ -198,8 +208,9 @@ config:
 - waker はインターネットから直接届かない前提です (Gate からのみ)。PROXY protocol を受けないので、
   NetworkPolicy で `25565` への ingress を Gate の Pod に、`8080` を監視系に絞ってください。
 - 受け取るパケットは長さを確保前に検査し (ハンドシェイク 1 KiB、Login Start 4 KiB)、各パケット 5 秒で打ち切ります。不正なパケットではパニックせず接続を閉じます。
-- クライアントの IP は Gate が隠すので IP ごとの制限はできません。代わりにワールドの「作成」だけを全体で 10 回/分に制限し、`MAX_WORLDS` で上限を掛けます。
-  既に存在するワールドへの接続は API を叩かず informer のキャッシュで答えます。
+- クライアントの IP は Gate が隠すので IP ごとの制限はできません。代わりにワールドの作成をログインに限り (認証なしのステータス ping では作らない)、
+  作成を全体で 10 回/分に制限し、`MAX_WORLDS` で上限を掛け、参加されないワールドは `UNJOINED_TIMEOUT` で早めに片付けます。
+  既に存在するワールドへの接続と、満杯・レート制限で断る接続は API を叩かず informer のキャッシュで答えます。
 - ID は正規形の UUID v7 だけを受け付けるので、Kubernetes の名前・S3 のキー・パスに任意の文字列が入ることはありません。
   info.json の `file_name` も `[A-Za-z0-9._-]` (先頭 `.` 不可、128 文字まで) だけを受け付け、initContainer にはシェルに埋め込まず環境変数で渡します。
 - ワールドの Pod は Pod Security Standards の restricted を満たす設定で、ServiceAccount トークンを持ちません。

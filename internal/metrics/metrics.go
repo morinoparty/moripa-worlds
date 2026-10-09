@@ -25,7 +25,7 @@ func New(running func() float64) *Metrics {
 		Registry: reg,
 		WakerConnections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "waker_connections_total",
-			Help: "Gate から転送されてきた接続の数 (state=status|login|unknown, result=starting|running|not_found|busy|error|bad_request)。",
+			Help: "Gate から転送されてきた接続の数 (state=status|login|unknown, result=created|starting|sleeping|not_found|busy|error|bad_request)。",
 		}, []string{"state", "result"}),
 		WorldsCreated: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "worlds_created_total",
@@ -33,7 +33,7 @@ func New(running func() float64) *Metrics {
 		}),
 		WorldsReaped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "worlds_reaped_total",
-			Help: "削除したワールドの数 (reason=idle|startup_timeout|schematic_missing|expired|swept)。",
+			Help: "削除したワールドの数 (reason=idle|unjoined|startup_timeout|schematic_missing|expired|swept)。",
 		}, []string{"reason"}),
 		SchematicsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "schematics_swept_total",

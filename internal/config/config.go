@@ -32,12 +32,13 @@ type Config struct {
 	WorldMemoryRequest resource.Quantity
 	WorldMemoryLimit   resource.Quantity
 
-	MaxWorlds      int
-	IdleTimeout    time.Duration
-	StartupTimeout time.Duration
-	SweepInterval  time.Duration
-	DeleteExpired  bool
-	LogLevel       slog.Level
+	MaxWorlds       int
+	IdleTimeout     time.Duration
+	UnjoinedTimeout time.Duration
+	StartupTimeout  time.Duration
+	SweepInterval   time.Duration
+	DeleteExpired   bool
+	LogLevel        slog.Level
 }
 
 // Load は getenv から設定を読む。未設定の項目は README の既定値になる。
@@ -121,6 +122,7 @@ func Load(getenv func(string) string) (Config, error) {
 		WorldMemoryLimit:   quantity("WORLD_MEMORY_LIMIT", "768Mi"),
 		MaxWorlds:          integer("MAX_WORLDS", 6, 0),
 		IdleTimeout:        duration("IDLE_TIMEOUT", 10*time.Minute),
+		UnjoinedTimeout:    duration("UNJOINED_TIMEOUT", 3*time.Minute),
 		StartupTimeout:     duration("STARTUP_TIMEOUT", 3*time.Minute),
 		SweepInterval:      duration("SWEEP_INTERVAL", time.Hour),
 		DeleteExpired:      boolean("DELETE_EXPIRED", true),

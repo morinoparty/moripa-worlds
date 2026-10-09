@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,7 +97,7 @@ func TestReaperStartupTimeoutAfterCrash(t *testing.T) {
 
 func TestReaperIdle(t *testing.T) {
 	ann := func(t time.Time) map[string]string {
-		return map[string]string{AnnotationLastActive: t.Format(time.RFC3339)}
+		return map[string]string{AnnotationLastActive: t.Format(time.RFC3339), AnnotationPlayed: "true"}
 	}
 	idle := deployment(id1, now.Add(-time.Hour), true, ann(now.Add(-11*time.Minute)), availableAt(corev1.ConditionTrue, now.Add(-50*time.Minute)))
 	recent := deployment(id2, now.Add(-time.Hour), true, ann(now.Add(-5*time.Minute)), availableAt(corev1.ConditionTrue, now.Add(-50*time.Minute)))
@@ -123,8 +124,50 @@ func TestReaperPlayersOnlineRecordsLastActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Annotations[AnnotationLastActive] != now.Format(time.RFC3339) {
-		t.Fatalf("last-active = %q", got.Annotations[AnnotationLastActive])
+	if got.Annotations[AnnotationLastActive] != now.Format(time.RFC3339) || got.Annotations[AnnotationPlayed] != "true" {
+		t.Fatalf("annotations = %v", got.Annotations)
+	}
+}
+
+// TestReaperUnjoined は、一度も参加されないワールドを IDLE_TIMEOUT より短い UNJOINED_TIMEOUT で消すことを確かめる。
+func TestReaperUnjoined(t *testing.T) {
+	ready := func(id string, at time.Time) *appsv1.Deployment {
+		// 作成時の last-active (= 作成時刻) だけを持ち、played は付いていない。
+		return deployment(id, at.Add(-time.Minute), true, map[string]string{AnnotationLastActive: at.Add(-time.Minute).Format(time.RFC3339)},
+			availableAt(corev1.ConditionTrue, at))
+	}
+	old := ready(id1, now.Add(-4*time.Minute))   // Ready から 4 分、誰も来ていない
+	fresh := ready(id2, now.Add(-2*time.Minute)) // Ready から 2 分
+	played := deployment(id3, now.Add(-time.Hour), true,
+		map[string]string{AnnotationLastActive: now.Add(-5 * time.Minute).Format(time.RFC3339), AnnotationPlayed: "true"},
+		availableAt(corev1.ConditionTrue, now.Add(-50*time.Minute)))
+	r, m := newReaper(t, allInfos(id1, id2, id3), map[string]int{addr(id1): 0, addr(id2): 0, addr(id3): 0}, old, fresh, played)
+	r.UnjoinedTimeout = 3 * time.Minute
+	got := r.ReapOnce(context.Background())
+	if got[id1] != ReasonUnjoined || len(got) != 1 {
+		t.Fatalf("reaped = %v", got)
+	}
+	if exists(t, m, id1) || !exists(t, m, id2) || !exists(t, m, id3) {
+		t.Fatal("wrong deployments deleted")
+	}
+}
+
+// TestReaperFirstPlayerMarkedImmediately は、Ready 直後 (last-active の書き込み間隔内) でも
+// 初めてプレイヤーを見たら played を記録することを確かめる。
+func TestReaperFirstPlayerMarkedImmediately(t *testing.T) {
+	d := deployment(id1, now.Add(-time.Minute), true, map[string]string{AnnotationLastActive: now.Add(-time.Minute).Format(time.RFC3339)},
+		availableAt(corev1.ConditionTrue, now.Add(-10*time.Second)))
+	r, m := newReaper(t, allInfos(id1), map[string]int{addr(id1): 1}, d)
+	r.UnjoinedTimeout = 3 * time.Minute
+	if got := r.ReapOnce(context.Background()); len(got) != 0 {
+		t.Fatalf("reaped = %v", got)
+	}
+	got, err := m.Client.AppsV1().Deployments("worlds").Get(context.Background(), "w-"+id1, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Played(got) {
+		t.Fatalf("annotations = %v", got.Annotations)
 	}
 }
 

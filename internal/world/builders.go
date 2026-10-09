@@ -32,6 +32,9 @@ const (
 	// AnnotationLastActive はプレイヤーが最後にいた時刻 (RFC 3339)。
 	// コントローラーが再起動してもアイドル判定を引き継ぐために Deployment に記録する。
 	AnnotationLastActive = "worlds.morino.party/last-active"
+	// AnnotationPlayed は一度でもプレイヤーがいたワールドに付ける ("true")。
+	// 付いていないワールドは IDLE_TIMEOUT ではなく短い UNJOINED_TIMEOUT で片付ける。
+	AnnotationPlayed = "worlds.morino.party/played"
 
 	// ManagedSelector は moripa-worlds が作ったオブジェクトだけを選ぶラベルセレクター。
 	ManagedSelector = LabelManagedBy + "=" + ValueManagedBy

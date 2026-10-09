@@ -90,6 +90,15 @@ func (m *Manager) Count() int {
 	return len(ds)
 }
 
+// Exists は id のワールド (削除中でない Deployment) があるかを informer のキャッシュから返す。API は叩かない。
+func (m *Manager) Exists(id string) bool {
+	if m.Lister == nil {
+		return false
+	}
+	d, err := m.Lister.Deployments(m.Settings.Namespace).Get(Name(id))
+	return err == nil && d.DeletionTimestamp == nil
+}
+
 // Ensure は info のワールドがなければ作る。何度呼んでもよい。
 func (m *Manager) Ensure(ctx context.Context, info *schematic.Info) (EnsureResult, error) {
 	ns, name := m.Settings.Namespace, Name(info.ID)
@@ -98,6 +107,16 @@ func (m *Manager) Ensure(ctx context.Context, info *schematic.Info) (EnsureResul
 		if _, err := m.Lister.Deployments(ns).Get(name); err == nil {
 			return Existing, nil
 		}
+		// 満杯なら API を叩かず、ロックも取らずに断る (混み合っているときの接続が
+		// API サーバーへの Get / List と reaper の削除待ちを生まないように)。
+		// キャッシュが遅れて少なく見えた場合は、下のロック内の List で改めて確かめる。
+		if m.Count() >= m.MaxWorlds {
+			return Full, nil
+		}
+	}
+	// レート制限も先に覗いておく (トークンは消費しない。消費はロック内の Allow で行う)。
+	if m.Limiter != nil && m.Limiter.Tokens() < 1 {
+		return RateLimited, nil
 	}
 
 	m.mu.Lock()
