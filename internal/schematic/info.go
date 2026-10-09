@@ -66,7 +66,7 @@ var fileNameRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
 func ParseInfo(b []byte, wantID string) (*Info, error) {
 	var info Info
 	if err := json.Unmarshal(b, &info); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	if err := info.Validate(wantID); err != nil {
 		return nil, err

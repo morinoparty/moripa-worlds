@@ -48,6 +48,7 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
@@ -115,7 +116,8 @@ func run() error {
 
 	factory.Start(ctx.Done())
 
-	mcLn, err := net.Listen("tcp", cfg.ListenMinecraft)
+	var lc net.ListenConfig
+	mcLn, err := lc.Listen(ctx, "tcp", cfg.ListenMinecraft)
 	if err != nil {
 		return fmt.Errorf("listen minecraft: %w", err)
 	}
@@ -132,7 +134,7 @@ func run() error {
 			"s3": store.Ping,
 		}),
 	}
-	httpLn, err := net.Listen("tcp", cfg.ListenHTTP)
+	httpLn, err := lc.Listen(ctx, "tcp", cfg.ListenHTTP)
 	if err != nil {
 		return fmt.Errorf("listen http: %w", err)
 	}

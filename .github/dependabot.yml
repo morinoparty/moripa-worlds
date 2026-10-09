@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      kubernetes:
+        patterns: [ "k8s.io/*" ]
+        # k8s.io/client-go はクラスター (1.35) に合わせて minor を上げない
+        update-types: [ "patch" ]
+      aws:
+        patterns: [ "github.com/aws/*" ]
+    ignore:
+      - dependency-name: "k8s.io/*"
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

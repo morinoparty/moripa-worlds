@@ -1,0 +1,17 @@
+# moripa-worlds の結合確認用 Gate Lite 設定 (本番の route と同じ形、bind / backend だけ差し替え)
+config:
+  bind: 127.0.0.1:35565
+  proxyProtocol: true
+  lite:
+    enabled: true
+    routes:
+      - host: '*.world.site1.dev.morino.party'
+        backend:
+          - 'w-$1.invalid:25565'
+          - '127.0.0.1:35566'
+        strategy: sequential
+        cachePingTTL: 3s
+        modifyVirtualHost: false
+        proxyProtocol: false
+  connectionTimeout: 5s
+  readTimeout: 30s
