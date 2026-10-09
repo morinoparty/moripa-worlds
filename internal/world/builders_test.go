@@ -85,8 +85,10 @@ func TestConfigMap(t *testing.T) {
 		"schematicOrigin": map[string]any{"x": 0.0, "y": 64.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0},
 		// spawn = origin + spawn_position (yaw / pitch はそのまま)
 		"spawn": map[string]any{"x": 2.5, "y": 65.0, "z": -3.5, "yaw": 90.0, "pitch": 0.0},
-		// voidY = originY - world_size.height - 32 = 64 - 8 - 32
-		"voidY": 24.0,
+		// 奈落は ianua-silvae が schematic の Offset を見て min(一番下のブロック, spawn.y) - 32 に置く
+		"voidDepth": 32.0,
+		// 古い ianua-silvae 向けの保険: min(64 + min(1, 0) - 8, -64) - 32
+		"voidY": -96.0,
 		"motd":  map[string]any{"description": "ロビーの噴水", "maxPlayers": float64(20)},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -106,7 +108,26 @@ func TestServerConfigDefaults(t *testing.T) {
 	if c.Spawn != (Position{X: 0, Y: -10, Z: 0}) || c.SchematicOrigin != (Position{Y: -10}) {
 		t.Errorf("spawn = %+v origin = %+v", c.Spawn, c.SchematicOrigin)
 	}
-	if c.VoidY != -242 {
+	// min(-10 + 0 - 200, -64) - 32
+	if c.VoidY != -242 || c.VoidDepth != 32 {
+		t.Errorf("voidY = %v voidDepth = %v", c.VoidY, c.VoidDepth)
+	}
+}
+
+// //copy をビルドの上空で行った schematic (Offset.y が大きく負) でも、保険の voidY は
+// ブロックが置かれうる最低の高さより下に来る。
+func TestServerConfigVoidBelowDimension(t *testing.T) {
+	info := testInfo()
+	info.WorldSize.Height = 5
+	info.SpawnPosition = schematic.Position{}
+	c := BuildServerConfig(info, 64)
+	if c.VoidY >= DimensionMinY {
+		t.Errorf("voidY = %v, want below %d", c.VoidY, DimensionMinY)
+	}
+	// スポーンが貼り付け位置より下でも、スポーンから高さ分 + VoidDepth 下より上にはならない。
+	info.SpawnPosition = schematic.Position{Y: -300}
+	c = BuildServerConfig(info, 64)
+	if c.VoidY != 64-300-5-VoidDepth {
 		t.Errorf("voidY = %v", c.VoidY)
 	}
 }

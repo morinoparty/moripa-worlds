@@ -48,6 +48,11 @@ const (
 	// UID は ianua-silvae イメージの実行ユーザー / グループ。
 	UID = 10001
 
+	// VoidDepth は奈落判定 (スポーンへ戻す高さ) を一番下のブロック / スポーンからどれだけ下に置くか。
+	VoidDepth = 32
+	// DimensionMinY は ianua-silvae (Minestom の overworld) の最低 Y。これより下のブロックは置かれない。
+	DimensionMinY = -64
+
 	// SchematicsMountPath は schematic の PVC (RustFS の moripa-utils/schematics) のマウント先。
 	SchematicsMountPath = "/schematics"
 	// ConfigMountPath は ianua-silvae の作業ディレクトリ /server からの config/ 。
@@ -117,6 +122,7 @@ type ServerConfig struct {
 	SchematicOrigin Position `json:"schematicOrigin"`
 	Spawn           Position `json:"spawn"`
 	VoidY           float64  `json:"voidY"`
+	VoidDepth       float64  `json:"voidDepth"`
 	Motd            Motd     `json:"motd"`
 }
 
@@ -126,8 +132,16 @@ func SchematicPath(info *schematic.Info) string {
 }
 
 // BuildServerConfig は info.json から ianua-silvae の設定を組み立てる。
-// schematic は (0, originY, 0) に貼り付け、スポーンは貼り付け位置 + spawn_position、
-// voidY は schematic の高さの 32 ブロック下とする。
+// schematic は (0, originY, 0) に貼り付け、スポーンは貼り付け位置 + spawn_position とする。
+//
+// 奈落の高さは ianua-silvae に voidDepth を渡して決めさせる。Sponge schematic のブロックは
+// 貼り付け位置 + Offset + (x, y, z) に置かれ、Offset (//copy した位置から見た範囲の位置) は
+// info.json に無いので、ここではブロックがどこまで下に来るか分からない。ianua-silvae は
+// schematic を読んだ後に min(一番下のブロック, spawn.y) - voidDepth を奈落とする。
+//
+// voidY は voidDepth を知らない古い ianua-silvae 向けの保険で、ブロックが置かれうる最低の
+// DimensionMinY よりも下 (と、貼り付け位置・スポーンから高さ分下のうち低い方) に置き、
+// 建物より上に奈落が来てスポーンへの転送が繰り返されることが無いようにする。
 func BuildServerConfig(info *schematic.Info, originY int) ServerConfig {
 	origin := Position{X: 0, Y: float64(originY), Z: 0}
 	sp := info.SpawnPosition
@@ -142,8 +156,9 @@ func BuildServerConfig(info *schematic.Info, originY int) ServerConfig {
 			X: origin.X + sp.X, Y: origin.Y + sp.Y, Z: origin.Z + sp.Z,
 			Yaw: sp.Yaw, Pitch: sp.Pitch,
 		},
-		VoidY: float64(originY - info.WorldSize.Height - 32),
-		Motd:  Motd{Description: info.DisplayTitle(), MaxPlayers: MaxPlayers},
+		VoidY:     min(origin.Y+min(sp.Y, 0)-float64(info.WorldSize.Height), DimensionMinY) - VoidDepth,
+		VoidDepth: VoidDepth,
+		Motd:      Motd{Description: info.DisplayTitle(), MaxPlayers: MaxPlayers},
 	}
 }
 

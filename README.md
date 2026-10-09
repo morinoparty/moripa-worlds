@@ -67,7 +67,9 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
   - `schematicPath`: `/schematics/<uuid>/<file_name>` (`file_name` は info.json の値。決め打ちしない)
   - `schematicOrigin`: `(0, WORLD_ORIGIN_Y, 0)`
   - `spawn`: `schematicOrigin + spawn_position` (x / y / z を足し、yaw / pitch はそのまま)
-  - `voidY`: `WORLD_ORIGIN_Y - world_size.height - 32`
+  - `voidDepth`: `32`。奈落 (スポーンへ戻す高さ) は ianua-silvae が schematic を読んだ後に `min(一番下のブロック, spawn.y) - 32` とします。
+    schematic のブロックは `schematicOrigin + Offset + (x, y, z)` に置かれ、Offset は info.json に無いのでコントローラーでは決められません。
+  - `voidY`: `min(WORLD_ORIGIN_Y + min(spawn_position.y, 0) - world_size.height, -64) - 32` (`voidDepth` を知らない古い ianua-silvae 向けの保険。ブロックが置かれうる最低の y=-64 より下)
   - `motd`: `{"description": title (なければ "morino.party world"), "maxPlayers": 20}`、`onlineMode: true`、`velocitySecret: null`
 - **Deployment** (replicas 1、Recreate): `WORLD_IMAGE` を UID/GID 10001・readOnlyRootFilesystem・capabilities なし・seccomp RuntimeDefault で動かします。
   PVC `WORLD_SCHEMATICS_PVC` を `/schematics` に読み取り専用で、ConfigMap を `/server/config` に、emptyDir を `/tmp` にマウントします。
