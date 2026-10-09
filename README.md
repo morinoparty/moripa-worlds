@@ -210,7 +210,7 @@ make build image       # bin/moripa-worlds / コンテナイメージ
 `hack/devwaker` は Kubernetes と S3 なしで waker だけを動かします (既知の ID を引数で渡し、作成は記録するだけ)。
 
 ```sh
-make build && docker run --rm -u $(id -u) -v $PWD:/src -w /src -e CGO_ENABLED=0 golang:1.26 go build -o bin/devwaker ./hack/devwaker
+docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/src -w /src -e CGO_ENABLED=0 golang:1.26 go build -o bin/devwaker ./hack/devwaker
 ./bin/devwaker -listen 127.0.0.1:35566 -known 0199c8a0-7b3e-7f12-9a4c-1d2e3f405162 &
 docker run -d --name gate --network host -v $PWD/hack/gate-e2e/config.yml:/config.yml:ro ghcr.io/minekube/gate:v0.74.32 --config /config.yml
 python3 -I hack/gate-e2e/mcclient.py 127.0.0.1 35565 '0199C8A0-7B3E-7F12-9A4C-1D2E3F405162.world.site1.dev.morino.party\0FML3\0' status --proxy-v2
