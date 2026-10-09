@@ -10,7 +10,7 @@ import (
 // nil のまま使ってもよい (メソッドは nil レシーバで何もしない)。
 type Metrics struct {
 	Registry          *prometheus.Registry
-	WakerConnections  *prometheus.CounterVec
+	APIRequests       *prometheus.CounterVec
 	WorldsCreated     prometheus.Counter
 	WorldsReaped      *prometheus.CounterVec
 	SchematicsSwept   prometheus.Counter
@@ -23,10 +23,10 @@ func New(running func() float64) *Metrics {
 	reg := prometheus.NewRegistry()
 	m := &Metrics{
 		Registry: reg,
-		WakerConnections: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "waker_connections_total",
-			Help: "Gate から転送されてきた接続の数 (state=status|login|unknown, result=created|starting|sleeping|not_found|busy|error|bad_request)。",
-		}, []string{"state", "result"}),
+		APIRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "api_requests_total",
+			Help: "プロキシからの API 呼び出しの数 (op=state|ensure, result=absent|starting|ready|not_found|created|existing|full|rate_limited|error|bad_request|unauthorized)。",
+		}, []string{"op", "result"}),
 		WorldsCreated: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "worlds_created_total",
 			Help: "作成したワールド (Deployment) の数。",
@@ -48,19 +48,19 @@ func New(running func() float64) *Metrics {
 		Help: "現在存在するワールド (moripa-worlds 管理の Deployment) の数。",
 	}, running)
 	reg.MustRegister(
-		m.WakerConnections, m.WorldsCreated, m.WorldsReaped, m.SchematicsSwept, m.worldsRunningFunc,
+		m.APIRequests, m.WorldsCreated, m.WorldsReaped, m.SchematicsSwept, m.worldsRunningFunc,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return m
 }
 
-// Connection は waker_connections_total を 1 増やす。
-func (m *Metrics) Connection(state, result string) {
+// APIRequest は api_requests_total を 1 増やす。
+func (m *Metrics) APIRequest(op, result string) {
 	if m == nil {
 		return
 	}
-	m.WakerConnections.WithLabelValues(state, result).Inc()
+	m.APIRequests.WithLabelValues(op, result).Inc()
 }
 
 // Created は worlds_created_total を 1 増やす。

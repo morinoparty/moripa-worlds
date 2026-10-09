@@ -13,7 +13,7 @@ import (
 
 func TestEndpoints(t *testing.T) {
 	m := metrics.New(func() float64 { return 3 })
-	m.Connection("status", "created")
+	m.APIRequest("ensure", "created")
 	m.Reaped("idle")
 	m.Created()
 	m.Swept()
@@ -44,7 +44,7 @@ func TestEndpoints(t *testing.T) {
 	code, body := get("/metrics")
 	for _, want := range []string{
 		"worlds_running 3",
-		`waker_connections_total{result="created",state="status"} 1`,
+		`api_requests_total{op="ensure",result="created"} 1`,
 		"worlds_created_total 1",
 		`worlds_reaped_total{reason="idle"} 1`,
 		"schematics_swept_total 1",

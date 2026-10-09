@@ -203,7 +203,16 @@ func TestDeployment(t *testing.T) {
 	}
 	env := map[string]string{}
 	for _, e := range c.Env {
+		if e.ValueFrom != nil {
+			continue
+		}
 		env[e.Name] = e.Value
+	}
+	if c.Env[0].Name != "IANUA_VELOCITY_SECRET" || c.Env[0].Value != "" || c.Env[0].ValueFrom == nil ||
+		!reflect.DeepEqual(c.Env[0].ValueFrom.SecretKeyRef, &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "worlds-forwarding"}, Key: "secret",
+		}) {
+		t.Errorf("velocity secret env = %+v", c.Env[0])
 	}
 	wantEnv := map[string]string{
 		"IANUA_ONLINE_MODE": "true",
@@ -262,5 +271,15 @@ func TestDeployment(t *testing.T) {
 	}
 	if len(ic.VolumeMounts) != 1 || !ic.VolumeMounts[0].ReadOnly {
 		t.Errorf("init mounts = %+v", ic.VolumeMounts)
+	}
+}
+
+func TestDeploymentForwardingSecretName(t *testing.T) {
+	s := testSettings()
+	s.ForwardingSecretName = "other-forwarding"
+	d := BuildDeployment(s, testInfo(), time.Now())
+	ref := d.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef
+	if ref.Name != "other-forwarding" || ref.Key != "secret" || ref.Optional != nil {
+		t.Fatalf("secretKeyRef = %+v", ref)
 	}
 }

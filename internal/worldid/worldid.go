@@ -69,3 +69,25 @@ func FromHost(addr, suffix string) (string, error) {
 	}
 	return id, nil
 }
+
+// FromVirtualHost は Gate の Inbound.VirtualHost().String() (ハンドシェイクの
+// "<サーバーアドレス>:<ポート>") からワールド ID を取り出す。末尾の ":<数字>" を外してから
+// FromHost と同じ規則で解釈する。Forge の "\0FML3\0" が付いていてもよい。
+func FromVirtualHost(addr, suffix string) (string, error) {
+	if i := strings.LastIndexByte(addr, ':'); i >= 0 && allDigits(addr[i+1:]) {
+		addr = addr[:i]
+	}
+	return FromHost(addr, suffix)
+}
+
+func allDigits(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}

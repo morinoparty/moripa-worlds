@@ -68,3 +68,31 @@ func FuzzFromHost(f *testing.F) {
 		}
 	})
 }
+
+func TestFromVirtualHost(t *testing.T) {
+	const v7 = "0199c8a0-7b3e-7f12-9a4c-1d2e3f405162"
+	tests := []struct {
+		name    string
+		addr    string
+		want    string
+		wantErr error
+	}{
+		{"with port", v7 + suffix + ":25565", v7, nil},
+		{"without port", v7 + suffix, v7, nil},
+		{"trailing dot with port", v7 + suffix + ".:25565", v7, nil},
+		{"forge with port", v7 + suffix + "\x00FML3\x00:25565", v7, nil},
+		{"uppercase with port", "0199C8A0-7B3E-7F12-9A4C-1D2E3F405162.WORLD.SITE1.DEV.MORINO.PARTY:1", v7, nil},
+		{"lobby host", "play.morino.party:25565", "", ErrWrongSuffix},
+		{"ip", "203.0.113.1:25565", "", ErrWrongSuffix},
+		{"bad id", "abc" + suffix + ":25565", "", ErrInvalidID},
+		{"non numeric port kept", v7 + suffix + ":x", "", ErrWrongSuffix},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := FromVirtualHost(tt.addr, suffix)
+			if !errors.Is(err, tt.wantErr) || got != tt.want {
+				t.Fatalf("FromVirtualHost(%q) = %q, %v; want %q, %v", tt.addr, got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}

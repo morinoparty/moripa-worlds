@@ -1,6 +1,9 @@
-// moripa-worlds は MoripaUtils がアップロードした schematic を、
-// <uuid>.world.site1.dev.morino.party への接続をきっかけに ianua-silvae のワールドとして起動し、
-// 使われなくなったら片付けるコントローラー。
+// moripa-worlds は MoripaUtils がアップロードした schematic を ianua-silvae のワールドとして
+// <uuid>.world.site1.dev.morino.party で遊べるようにする。1 つのバイナリに 2 つの役割がある。
+//
+//	moripa-worlds controller  ワールドの作成 (API)・片付け (reaper / sweeper)。Kubernetes と S3 に触れる
+//	moripa-worlds proxy       Gate を組み込んだプロキシ。ロビーで待たせ、起動したワールドへ移す。
+//	                          コントローラーの API だけを使い、Kubernetes / S3 の権限は持たない
 package main
 
 import (
@@ -23,12 +26,13 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/morinoparty/moripa-worlds/internal/api"
 	"github.com/morinoparty/moripa-worlds/internal/config"
 	"github.com/morinoparty/moripa-worlds/internal/httpserver"
 	"github.com/morinoparty/moripa-worlds/internal/mcproto"
 	"github.com/morinoparty/moripa-worlds/internal/metrics"
+	"github.com/morinoparty/moripa-worlds/internal/proxy"
 	"github.com/morinoparty/moripa-worlds/internal/schematic"
-	"github.com/morinoparty/moripa-worlds/internal/waker"
 	"github.com/morinoparty/moripa-worlds/internal/world"
 )
 
@@ -43,26 +47,77 @@ const (
 	shutdownGracePeriod = 10 * time.Second
 )
 
+const usage = `usage: moripa-worlds <command>
+
+commands:
+  controller   ワールドの作成 API・reaper・sweeper (Kubernetes / S3 を使う)
+  proxy        Gate を組み込んだプロキシ (ロビーで待たせてワールドへ移す)
+
+flags:
+  --version    バージョンを表示する
+
+設定はすべて環境変数で渡す (README 参照)。
+`
+
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+	os.Exit(realMain(os.Args[1:]))
+}
+
+func realMain(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	var run func() error
+	switch args[0] {
+	case "-version", "--version", "version":
 		fmt.Println(version)
-		return
+		return 0
+	case "-h", "-help", "--help", "help":
+		fmt.Print(usage)
+		return 0
+	case "controller":
+		run = runController
+	case "proxy":
+		run = runProxy
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", args[0], usage)
+		return 2
+	}
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "unexpected arguments: %q (configuration is read from environment variables)\n", args[1:])
+		return 2
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
-func run() error {
-	cfg, err := config.Load(os.Getenv)
+func runProxy() error {
+	cfg, err := config.LoadProxy(os.Getenv)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(log)
-	log.Info("starting moripa-worlds", "version", version, "namespace", cfg.Namespace, "suffix", cfg.WorldHostSuffix)
+	log.Info("starting moripa-worlds proxy", "version", version, "suffix", cfg.WorldHostSuffix,
+		"protocol", cfg.RequiredProtocol, "startup_wait", cfg.StartupWait.String())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return proxy.Run(ctx, cfg, log)
+}
+
+func runController() error {
+	cfg, err := config.LoadController(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	slog.SetDefault(log)
+	log.Info("starting moripa-worlds controller", "version", version, "namespace", cfg.Namespace, "suffix", cfg.WorldHostSuffix)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -95,6 +150,8 @@ func run() error {
 			OriginY:       cfg.WorldOriginY,
 			MemoryRequest: cfg.WorldMemoryRequest,
 			MemoryLimit:   cfg.WorldMemoryLimit,
+
+			ForwardingSecretName: cfg.ForwardingSecretName,
 		},
 		MaxWorlds: cfg.MaxWorlds,
 		Limiter:   rate.NewLimiter(rate.Every(time.Minute/creationRatePerMin), creationRatePerMin),
@@ -116,24 +173,36 @@ func run() error {
 
 	factory.Start(ctx.Done())
 
-	var lc net.ListenConfig
-	mcLn, err := lc.Listen(ctx, "tcp", cfg.ListenMinecraft)
-	if err != nil {
-		return fmt.Errorf("listen minecraft: %w", err)
+	apiSrv := &api.Server{
+		Token:   cfg.APIToken,
+		Store:   store,
+		Worlds:  manager,
+		Address: func(id string) string { return world.Address(cfg.Namespace, id) },
+		Ping: func(ctx context.Context, addr string) error {
+			_, err := mcproto.Ping(ctx, addr, statusPingTimeout)
+			return err
+		},
+		Log:     log.With("component", "api"),
+		Metrics: m,
 	}
+	mux := httpserver.New(m.Registry, map[string]httpserver.ReadyCheck{
+		"informer": func(context.Context) error {
+			if !synced() {
+				return errors.New("deployment informer not synced")
+			}
+			return nil
+		},
+		"s3": store.Ping,
+	})
+	apiSrv.Register(mux)
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenHTTP,
 		ReadHeaderTimeout: 5 * time.Second,
-		Handler: httpserver.New(m.Registry, map[string]httpserver.ReadyCheck{
-			"informer": func(context.Context) error {
-				if !synced() {
-					return errors.New("deployment informer not synced")
-				}
-				return nil
-			},
-			"s3": store.Ping,
-		}),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		Handler:           mux,
 	}
+	var lc net.ListenConfig
 	httpLn, err := lc.Listen(ctx, "tcp", cfg.ListenHTTP)
 	if err != nil {
 		return fmt.Errorf("listen http: %w", err)
@@ -147,25 +216,12 @@ func run() error {
 		}
 	})
 
-	// informer のキャッシュが揃ってから waker / reaper / sweeper を動かす。
+	// informer のキャッシュが揃ってから reaper / sweeper を動かす
+	// (API は揃うまで Deployment を見落とすが、ensure は API サーバーで確かめてから作る)。
 	if !waitForSync(ctx, synced) {
-		_ = mcLn.Close()
 		return shutdown(httpSrv, &wg, nil)
 	}
 	log.Info("informer synced", "worlds", manager.Count())
-
-	wk := &waker.Server{
-		HostSuffix: cfg.WorldHostSuffix,
-		Store:      store,
-		Worlds:     manager,
-		Log:        log.With("component", "waker"),
-		Metrics:    m,
-	}
-	wg.Go(func() {
-		if err := wk.Serve(ctx, mcLn); err != nil {
-			errCh <- fmt.Errorf("waker: %w", err)
-		}
-	})
 
 	reaper := &world.Reaper{
 		Manager:         manager,
@@ -201,7 +257,7 @@ func run() error {
 		wg.Go(func() { sweeper.Run(ctx, cfg.SweepInterval) })
 	}
 
-	log.Info("ready", "minecraft", mcLn.Addr().String(), "http", httpLn.Addr().String())
+	log.Info("ready", "http", httpLn.Addr().String())
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down")

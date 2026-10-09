@@ -13,8 +13,8 @@ import (
 // ReadyCheck は準備ができていなければエラーを返す。
 type ReadyCheck func(ctx context.Context) error
 
-// New は HTTP ハンドラーを作る。
-func New(reg *prometheus.Registry, checks map[string]ReadyCheck) http.Handler {
+// New は HTTP ハンドラーを作る。呼び出し側は返った ServeMux に API などを足してよい。
+func New(reg *prometheus.Registry, checks map[string]ReadyCheck) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))

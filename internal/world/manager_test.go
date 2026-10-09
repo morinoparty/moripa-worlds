@@ -158,10 +158,24 @@ func TestEnsureBusyWithoutAPICalls(t *testing.T) {
 	}
 }
 
-func TestExists(t *testing.T) {
-	m, _ := newManager(t, deployment(id1, time.Now(), false, nil))
-	if !m.Exists(id1) || m.Exists(id2) {
-		t.Fatal("Exists mismatch")
+func TestStatus(t *testing.T) {
+	deleting := deployment(id3, time.Now(), true, nil)
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"test/keep"}
+	m, _ := newManager(t, deployment(id1, time.Now(), false, nil), deployment(id2, time.Now(), true, nil), deleting)
+	for _, tt := range []struct {
+		id            string
+		exists, ready bool
+	}{
+		{id1, true, false},
+		{id2, true, true},
+		{id3, true, false},
+		{"0199c8a0-7b3e-7f12-9a4c-000000000009", false, false},
+	} {
+		if e, r := m.Status(tt.id); e != tt.exists || r != tt.ready {
+			t.Errorf("Status(%s) = %v, %v; want %v, %v", tt.id, e, r, tt.exists, tt.ready)
+		}
 	}
 }
 

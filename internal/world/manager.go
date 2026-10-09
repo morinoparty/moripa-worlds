@@ -90,13 +90,18 @@ func (m *Manager) Count() int {
 	return len(ds)
 }
 
-// Exists は id のワールド (削除中でない Deployment) があるかを informer のキャッシュから返す。API は叩かない。
-func (m *Manager) Exists(id string) bool {
+// Status は id のワールドの Deployment があるか (削除中を含む) と、Pod が Ready かを
+// informer のキャッシュから返す。API は叩かない。削除中のものは exists=true・ready=false とする
+// (消え終わると exists=false になり、プロキシが ensure し直す)。
+func (m *Manager) Status(id string) (exists, ready bool) {
 	if m.Lister == nil {
-		return false
+		return false, false
 	}
 	d, err := m.Lister.Deployments(m.Settings.Namespace).Get(Name(id))
-	return err == nil && d.DeletionTimestamp == nil
+	if err != nil {
+		return false, false
+	}
+	return true, d.DeletionTimestamp == nil && Ready(d)
 }
 
 // Ensure は info のワールドがなければ作る。何度呼んでもよい。

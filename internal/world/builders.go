@@ -78,10 +78,31 @@ type Settings struct {
 	OriginY       int
 	MemoryRequest resource.Quantity
 	MemoryLimit   resource.Quantity
+	// ForwardingSecretName は Velocity modern forwarding の秘密を持つ Secret の名前 (キー ForwardingSecretKey)。
+	// 空なら DefaultForwardingSecretName。プロキシ (Gate) と同じ値でないとワールドに入れない。
+	ForwardingSecretName string
+}
+
+// ForwardingSecretName / Key の既定値。
+const (
+	DefaultForwardingSecretName = "worlds-forwarding"
+	ForwardingSecretKey         = "secret"
+)
+
+func (s Settings) forwardingSecretName() string {
+	if s.ForwardingSecretName != "" {
+		return s.ForwardingSecretName
+	}
+	return DefaultForwardingSecretName
 }
 
 // Name はワールド ID からオブジェクト名 (w-<uuid>) を作る。
 func Name(id string) string { return "w-" + id }
+
+// Address はワールドの Service の接続先 ("w-<uuid>.<namespace>.svc.cluster.local:25565")。
+func Address(namespace, id string) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", Name(id), namespace, Port)
+}
 
 // Labels はワールドのオブジェクトすべてに付けるラベル。
 // ArgoCD の追跡対象にならないよう app.kubernetes.io/instance は付けない。
@@ -292,6 +313,13 @@ func BuildDeployment(s Settings, info *schematic.Info, now time.Time) *appsv1.De
 						Image:           s.Image,
 						ImagePullPolicy: worldPullPolicy(s.Image),
 						Env: []corev1.EnvVar{
+							// IANUA_VELOCITY_SECRET があると ianua-silvae は Velocity modern forwarding だけを受け付け、
+							// 自分では認証しない (IANUA_ONLINE_MODE は無視される)。認証はプロキシ (Gate) が済ませる。
+							// Secret が無いと Pod は CreateContainerConfigError で起動しない (認証なしで開くよりよい)。
+							{Name: "IANUA_VELOCITY_SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: s.forwardingSecretName()},
+								Key:                  ForwardingSecretKey,
+							}}},
 							{Name: "IANUA_ONLINE_MODE", Value: "true"},
 							{Name: "IANUA_BIND", Value: "0.0.0.0"},
 							{Name: "IANUA_PORT", Value: fmt.Sprint(Port)},
