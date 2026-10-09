@@ -10,7 +10,7 @@ config:
           - 'w-$1.invalid:25565'
           - '127.0.0.1:35566'
         strategy: sequential
-        cachePingTTL: 3s
+        cachePingTTL: -1s
         modifyVirtualHost: false
         proxyProtocol: false
   connectionTimeout: 5s

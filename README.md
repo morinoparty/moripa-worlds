@@ -80,6 +80,9 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
 | `expired` | `delete_at` を過ぎた |
 
 S3 に一時的に繋がらない場合は削除しません。
+Ready かどうかに関わらず、info.json が有効なワールドの ConfigMap / Service が欠けていたり、前の世代のもの
+(ownerReference の UID が今の Deployment と違う) だったりすれば作り直します。
+作成 (waker) と削除 (reaper / sweeper) は同じロックで直列化し、作成時に同名の消し残しがあれば UID を確かめて作り直します。
 
 ### 期限切れ schematic の削除 (sweeper)
 
@@ -87,9 +90,18 @@ S3 に一時的に繋がらない場合は削除しません。
 各 `<id>/info.json` を読んで `delete_at` を過ぎたものについて、
 
 1. そのワールドの Kubernetes オブジェクトを削除し、
-2. 「info.json があれば本体もある」という前提を崩さないよう `info.json` を先に、残りのオブジェクトをその後に DeleteObjects (1000 件ずつ) で削除します。
+2. `<id>/` 以下を先に列挙し (列挙に失敗したら何も消しません)、「info.json があれば本体もある」という前提を崩さないよう
+   `info.json` を先に、残りのオブジェクトをその後に DeleteObjects (1000 件ずつ) で削除します。
 
-info.json のないディレクトリ (アップロード途中など) や UUID v7 でないディレクトリには触りません。削除したキーはログに出します。
+`info.json` を消した後で失敗すると info.json のないディレクトリが残ります。これは取りこぼさないよう、
+
+- 同じプロセス内では失敗した ID を覚えておき、次の走査で残りを消します。
+- info.json のないディレクトリは、中のオブジェクトの最終更新 (LastModified の最大) から 24 時間経っていれば消します
+  (再起動を挟んだ場合や、本体だけ書かれて info.json が書かれなかったアップロードの残骸もこれで消えます)。
+  アップロード途中 (本体を書いてから info.json を書くまでの数秒) のディレクトリには触りません。
+
+info.json があるが内容が不正なディレクトリ (期限が分からない) と UUID v7 でないディレクトリには触りません。削除したキーはログに出します。
+走査全体は 10 分、S3 の呼び出しは 1 回ごとに 5 秒 (DeleteObjects は 30 秒) で打ち切るので、RustFS への接続が止まっても sweeper が止まり続けることはありません。
 
 ## 環境変数
 
@@ -142,7 +154,8 @@ config:
           - 'w-$1.worlds.svc.cluster.local:25565'
           - 'moripa-worlds.worlds.svc.cluster.local:25565'
         strategy: sequential
-        cachePingTTL: 3s
+        # ステータス応答をキャッシュしない (下記)
+        cachePingTTL: -1s
         # 元のホスト名のまま転送する (waker がホスト名から ID を読む)
         modifyVirtualHost: false
         # backend には PROXY protocol を送らない (ianua-silvae / waker は受けない)
@@ -154,12 +167,13 @@ config:
 `fallback` (全 backend に繋がらないときのステータス応答)、`proxyProtocol`、`tcpShieldRealIP`、`modifyVirtualHost`。
 ホスト名の照合は小文字化して行いますが、backend に転送するハンドシェイクは元のまま (大文字・`\0FML3\0`・末尾の `.` も) です。
 
-> [!WARNING]
-> **`cachePingTTL` は backend のアドレス (とプロトコル番号) ごとのキャッシュです。**
-> waker のアドレスはすべてのワールドで共通なので、`cachePingTTL: 3s` だと、あるワールドへのステータス ping の応答が
-> 3 秒以内の別のワールドへのステータス ping にもそのまま返り、後者は waker に届かない (= 起動しない・MOTD が別のワールドのもの) ことを
-> Gate v0.74.32 で確認しました (`hack/gate-e2e` 参照)。ログインはキャッシュされないので必ず waker に届きます。
-> 確実にするには、この route だけ `cachePingTTL: -1` (キャッシュ無効) にすることを勧めます。
+> [!NOTE]
+> **`cachePingTTL` は負の値 (`-1s`) にしてステータス応答のキャッシュを無効にしています。**
+> Gate Lite のキャッシュは backend のアドレス (とプロトコル番号) ごとで、ホスト名を含みません。waker のアドレスはすべてのワールドで共通なので、
+> 正の値 (例えば `3s`) だと、あるワールドへのステータス ping の応答が TTL 以内の別のワールドへのステータス ping にもそのまま返り、
+> 後者は waker に届きません (= ワールドが起動せず、MOTD も別のワールドのもの。存在するワールドに「ワールドが見つかりません」と出ることもある)。
+> Gate v0.74.32 で `3s` ではこうなり、`-1s` では毎回 waker に届くことを確認しました (`hack/gate-e2e` 参照)。
+> ログインはもともとキャッシュされません。キャッシュを切っても負荷は waker の info.json キャッシュ (30 秒 / 10 秒) が吸収します。
 
 - `config.proxyProtocol: true` でも、PROXY ヘッダーのない接続も受け付けます (Gate v0.74.32 で確認)。
   ヘッダーを信頼する送信元は `config.proxyProtocolTrustedProxies` で、既定はループバックとプライベート / リンクローカルの範囲だけです。

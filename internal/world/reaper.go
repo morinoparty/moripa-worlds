@@ -120,6 +120,11 @@ func (r *Reaper) check(ctx context.Context, d *appsv1.Deployment) string {
 		log.Warn("failed to look up schematic; skipping this round", "error", err)
 	case info.Expired(now):
 		return r.reap(ctx, log, id, ReasonExpired)
+	default:
+		// 作成と削除が重なったなどで ConfigMap / Service が欠けていれば作り直す。
+		if rerr := r.Manager.Repair(ctx, info, d); rerr != nil {
+			log.Warn("failed to repair world objects", "error", rerr)
+		}
 	}
 
 	if !Ready(d) {

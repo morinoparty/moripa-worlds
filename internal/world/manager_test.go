@@ -2,6 +2,7 @@ package world
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -170,6 +172,120 @@ func TestDelete(t *testing.T) {
 	if err := m.Delete(ctx, id2); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// withUIDs は fake clientset が付けない UID を作成時に付ける。
+func withUIDs(cs *fake.Clientset) {
+	n := 0
+	cs.PrependReactor("create", "*", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if o, ok := a.(k8stesting.CreateAction).GetObject().(metav1.Object); ok && o.GetUID() == "" {
+			n++
+			o.SetUID(types.UID(fmt.Sprintf("uid-%d", n)))
+		}
+		return false, nil, nil
+	})
+}
+
+func TestEnsureReplacesStaleChildren(t *testing.T) {
+	// 前の世代のワールドの ConfigMap / Service が消し残っている (Deployment だけ消えた直後)。
+	stale := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: "w-" + id1, UID: "old-deployment"}
+	cm, err := BuildConfigMap(testSettings(), infoWithID(id1), &stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.UID = "old-cm"
+	svc := BuildService(testSettings(), id1, &stale)
+	svc.UID = "old-svc"
+	m, cs := newManager(t, cm, svc)
+	withUIDs(cs)
+	ctx := context.Background()
+	if res, err := m.Ensure(ctx, infoWithID(id1)); err != nil || res != Created {
+		t.Fatalf("Ensure = %v, %v", res, err)
+	}
+	d, err := cs.AppsV1().Deployments("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCM, err := cs.CoreV1().ConfigMaps("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSvc, err := cs.CoreV1().Services("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []metav1.Object{gotCM, gotSvc} {
+		if !ownedBy(o, d.UID) || ownedBy(o, "old-deployment") {
+			t.Errorf("%T owner = %+v, want %s", o, o.GetOwnerReferences(), d.UID)
+		}
+	}
+}
+
+func TestEnsureKeepsOwnChildren(t *testing.T) {
+	m, cs := newManager(t)
+	withUIDs(cs)
+	ctx := context.Background()
+	if _, err := m.Ensure(ctx, infoWithID(id1)); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := cs.CoreV1().Services("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	d, _ := cs.AppsV1().Deployments("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err := m.createChildren(ctx, infoWithID(id1), d); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := cs.CoreV1().Services("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if before.UID != after.UID {
+		t.Fatal("own service must not be recreated")
+	}
+}
+
+func TestRepairRecreatesMissingChildren(t *testing.T) {
+	m, cs := newManager(t)
+	withUIDs(cs)
+	ctx := context.Background()
+	if _, err := m.Ensure(ctx, infoWithID(id1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.CoreV1().Services("worlds").Delete(ctx, "w-"+id1, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := cs.AppsV1().Deployments("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err := m.Repair(ctx, infoWithID(id1), d); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := cs.CoreV1().Services("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{})
+	if err != nil || !ownedBy(svc, d.UID) {
+		t.Fatalf("service = %+v, %v", svc, err)
+	}
+	// Deployment が別物に置き換わっていたら何もしない。
+	if err := cs.CoreV1().Services("worlds").Delete(ctx, "w-"+id1, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	old := d.DeepCopy()
+	old.UID = "gone"
+	if err := m.Repair(ctx, infoWithID(id1), old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CoreV1().Services("worlds").Get(ctx, "w-"+id1, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("service should not be created for a replaced deployment: %v", err)
+	}
+}
+
+func TestDeleteWaitsForEnsure(t *testing.T) {
+	m, _ := newManager(t)
+	m.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		_ = m.Delete(context.Background(), id1)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Delete must take the manager lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	m.mu.Unlock()
+	<-done
 }
 
 // deployment はテスト用の管理対象 Deployment を作る。

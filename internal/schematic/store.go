@@ -168,6 +168,8 @@ func (s *Store) Invalidate(id string) {
 // Fetch はキャッシュを使わずに info.json を読む。
 // 存在しない・内容が不正な場合は ErrNotFound (不正な場合は ErrInvalid も) を返す。
 func (s *Store) Fetch(ctx context.Context, id string) (*Info, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.opts.Bucket),
 		Key:    aws.String(s.infoKey(id)),
@@ -214,7 +216,7 @@ func (s *Store) ListIDs(ctx context.Context) ([]string, error) {
 		Delimiter: aws.String("/"),
 	})
 	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
+		page, err := s.nextPage(ctx, p)
 		if err != nil {
 			return nil, fmt.Errorf("schematic: list %s: %w", s.opts.Prefix, err)
 		}
@@ -231,32 +233,65 @@ func (s *Store) ListIDs(ctx context.Context) ([]string, error) {
 // maxDeleteBatch は DeleteObjects 1 回で消せる最大キー数。
 const maxDeleteBatch = 1000
 
-// DeleteAll は schematics/<id>/ 以下のオブジェクトをすべて削除し、削除したキーを返す。
-// 「info.json があれば本体もある」という前提を崩さないよう、info.json を先に消す。
-func (s *Store) DeleteAll(ctx context.Context, id string) ([]string, error) {
-	defer s.Invalidate(id)
-	var deleted []string
-	if err := s.deleteKeys(ctx, []string{s.infoKey(id)}); err != nil {
-		return nil, err
-	}
-	deleted = append(deleted, s.infoKey(id))
+// deleteTimeout は DeleteObjects 1 回 (最大 1000 キー) の上限。
+const deleteTimeout = 30 * time.Second
 
-	var keys []string
+// nextPage は ListObjectsV2 の 1 ページを s.opts.Timeout 以内に読む。
+// 止まった接続で呼び出し元 (sweeper など) がいつまでも待たないようにする。
+func (s *Store) nextPage(ctx context.Context, p *s3.ListObjectsV2Paginator) (*s3.ListObjectsV2Output, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
+	return p.NextPage(ctx)
+}
+
+// Object は schematics/<id>/ 以下のオブジェクト。
+type Object struct {
+	Key          string
+	LastModified time.Time
+}
+
+// ListDir は schematics/<id>/ 以下のオブジェクトをすべて返す。
+func (s *Store) ListDir(ctx context.Context, id string) ([]Object, error) {
+	var objs []Object
 	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.opts.Bucket),
 		Prefix: aws.String(s.dir(id)),
 	})
 	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
+		page, err := s.nextPage(ctx, p)
 		if err != nil {
-			return deleted, fmt.Errorf("schematic: list %s: %w", s.dir(id), err)
+			return nil, fmt.Errorf("schematic: list %s: %w", s.dir(id), err)
 		}
 		for _, o := range page.Contents {
-			if k := aws.ToString(o.Key); k != s.infoKey(id) {
-				keys = append(keys, k)
-			}
+			objs = append(objs, Object{Key: aws.ToString(o.Key), LastModified: aws.ToTime(o.LastModified)})
 		}
 	}
+	return objs, nil
+}
+
+// DeleteAll は schematics/<id>/ 以下のオブジェクトをすべて削除し、削除したキーを返す。
+// 先に一覧を取ってから (一覧に失敗したら何も消さない)、「info.json があれば本体もある」という
+// 前提を崩さないよう info.json を先に消し、残りを消す。info.json を消した後に失敗した場合は
+// info.json のないディレクトリが残るので、呼び出し側 (Sweeper) で再試行すること。
+func (s *Store) DeleteAll(ctx context.Context, id string) ([]string, error) {
+	defer s.Invalidate(id)
+	objs, err := s.ListDir(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	infoKey := s.infoKey(id)
+	var keys []string
+	for _, o := range objs {
+		if o.Key != infoKey {
+			keys = append(keys, o.Key)
+		}
+	}
+
+	var deleted []string
+	if err := s.deleteKeys(ctx, []string{infoKey}); err != nil {
+		return nil, err
+	}
+	deleted = append(deleted, infoKey)
 	for start := 0; start < len(keys); start += maxDeleteBatch {
 		batch := keys[start:min(start+maxDeleteBatch, len(keys))]
 		if err := s.deleteKeys(ctx, batch); err != nil {
@@ -272,6 +307,8 @@ func (s *Store) deleteKeys(ctx context.Context, keys []string) error {
 	for i, k := range keys {
 		objs[i] = types.ObjectIdentifier{Key: aws.String(k)}
 	}
+	ctx, cancel := context.WithTimeout(ctx, max(s.opts.Timeout, deleteTimeout))
+	defer cancel()
 	out, err := s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(s.opts.Bucket),
 		Delete: &types.Delete{Objects: objs, Quiet: aws.Bool(true)},
