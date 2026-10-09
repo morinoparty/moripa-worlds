@@ -1,60 +1,114 @@
 # moripa-worlds
 
 MoripaUtils (`/mu schematic upload`) が S3 互換ストレージ (RustFS) にアップロードした schematic を、
-Minecraft で `<uuidv7>.world.site1.dev.morino.party` に接続するだけで遊べるワールドとして起動するコントローラーです。
+Minecraft で `<uuidv7>.world.site1.dev.morino.party` に接続するだけで遊べるワールドとして起動します。
 
 - 接続先のホスト名に含まれる schematic ID (UUID v7) から `schematics/<ID>/info.json` を探し、
   [ianua-silvae](https://github.com/morinoparty/ianua-silvae) (Minestom 製の軽量サーバー) のワールドを Kubernetes 上に作ります。
-- ワールドはログイン (参加) したときに起動し、再接続を促します。サーバーリストの ping では起動せず、MOTD で「停止中です。参加すると起動します」(起動中なら「起動しています…」) と表示します。
+- プレイヤーは Mojang の認証を済ませると、ワールドが起動済みならそのまま、まだなら常設の**ロビー**に入り、
+  アクションバーに「「<タイトル>」を起動しています… N秒」と出ている間にワールドが起動して、**再接続なしで**ワールドへ移ります。
+- ワールドを作るのは認証済みのプレイヤーが来たときだけです。サーバーリストの ping では作らず、MOTD で状態を表示します。
 - 誰もいなくなったワールド・起動しないワールド・schematic が消えたワールドは自動で片付けます。
 - `info.json` の `delete_at` を過ぎた schematic は S3 から削除します (MoripaUtils 自身は削除しないため)。
+
+1 つのイメージ `ghcr.io/morinoparty/moripa-worlds` に 2 つのサブコマンドがあります。
+
+| サブコマンド | Deployment | 役割 | 権限 |
+| --- | --- | --- | --- |
+| `moripa-worlds proxy` | `gate` (2 台) | [Gate](https://github.com/minekube/gate) v0.74.32 を classic モードで組み込んだプロキシ + プラグイン。ロビーで待たせ、起動したワールドへ移す | なし (Kubernetes の権限・S3 のキーを持たない。コントローラーの API だけを使う) |
+| `moripa-worlds controller` | `moripa-worlds` (1 台) | ワールドの作成 API・reaper・sweeper | namespace `worlds` の Role と S3 のキー |
+
+`moripa-worlds --version` でバージョンを表示します。設定はすべて環境変数で渡します (引数はサブコマンド名だけ)。
 
 ## 構成
 
 ```mermaid
 flowchart LR
     client[Minecraft クライアント] -- ":25565" --> haproxy["HAProxy (Linode ハブ)<br/>handshake のホスト名で振り分け<br/>PROXY protocol v2"]
-    haproxy -- "NodePort 30565" --> gate["Gate Lite (Service gate)<br/>*.world.site1.dev.morino.party"]
+    haproxy -- "NodePort 30565" --> gate["gate × 2<br/>moripa-worlds proxy<br/>(Gate classic + プラグイン)"]
+    gate -- "Mojang 認証 (HTTPS)" --> mojang[(sessionserver.mojang.com)]
     subgraph worlds [namespace worlds]
-        gate -- "① w-$1.worlds.svc:25565" --> world["w-&lt;uuid&gt;<br/>ianua-silvae"]
-        gate -. "② ①に繋がらないとき" .-> waker["moripa-worlds<br/>(waker / reaper / sweeper)"]
-        waker -- "作成・削除" --> world
+        gate -- "① 起動を待つ間<br/>velocity forwarding" --> lobby["lobby<br/>ianua-silvae (常設・ArgoCD 管理)"]
+        gate -- "② 起動したら移す<br/>velocity forwarding" --> world["w-&lt;uuid&gt;<br/>ianua-silvae"]
+        gate -- "GET 状態 / POST ensure<br/>Bearer API_TOKEN :8080" --> ctl["moripa-worlds controller<br/>(API / reaper / sweeper)"]
+        ctl -- "作成・削除" --> world
+        ctl -. "ステータス ping :25565" .-> world
         world -- "PVC schematics (読み取り専用)" --> csi["csi-s3 (geesefs)"]
     end
-    waker -- "GetObject / ListObjectsV2 / DeleteObjects" --> rustfs[("RustFS<br/>moripa-utils/schematics/")]
+    ctl -- "GetObject / ListObjectsV2 / DeleteObjects" --> rustfs[("RustFS<br/>moripa-utils/schematics/")]
     csi --> rustfs
 ```
 
-1. Gate Lite はホスト名の `*` を `$1` として取り出し、`w-$1.worlds.svc.cluster.local:25565` → `moripa-worlds.worlds.svc.cluster.local:25565` の順に接続を試みます (`strategy: sequential`)。
-2. ワールドが動いていなければ Service がない (NXDOMAIN) か、エンドポイントがなく Cilium が reject するので、接続は moripa-worlds (waker) に落ちます。
-3. waker はログインならワールドを作成して切断メッセージを返し、ステータス ping なら作成せずに MOTD を返します。10〜30 秒後に再接続すると、今度は ① でワールドに直接繋がります。
+接続の流れ:
 
-### ワールドの起動 (waker)
+1. ハブの HAProxy が `<uuid>.world.site1.dev.morino.party` 宛ての接続を PROXY protocol v2 付きで NodePort 30565 (Service `gate`) へ送ります。
+2. **認証の前** (`PreLoginEvent`): ホスト名が `<uuid><WORLD_HOST_SUFFIX>` でなければ「このアドレスでは接続できません」、
+   プロトコル番号が `REQUIRED_PROTOCOL` (777 = Minecraft 26.3) でなければ「Minecraft 26.3 で接続してください」で切断します (Mojang に問い合わせません)。
+3. Gate が Mojang の認証を行います (`onlineMode: true`)。
+4. **認証の後** (`PlayerChooseInitialServerEvent`): API で状態を聞き (`GET /v1/worlds/{id}`)、
+   - 見つからない → 「ワールドが見つかりません: <id>」で切断。
+   - `ready` → `w-<uuid>` を Gate に登録し、最初の接続先にする (ロビーを経由しない)。
+   - それ以外 → `POST /v1/worlds/{id}/ensure` (3 秒で打ち切り)。`full` / `rate_limited` → 「現在混み合っています…」、`error` → 「ワールドを起動できませんでした…」で切断。
+     `created` / `existing` → 最初の接続先をロビーにして、待機ループを始める。
+5. **待機ループ** (プレイヤーごと、`player.Context()` に紐づく): 1 秒ごと (揺らぎ付き) に状態を見て、2 秒ごとにアクションバーを送ります。
+   状態の問い合わせはワールドごとに 1 本にまとめる (singleflight + 0.9 秒のキャッシュ) ので、N 人が同じワールドを待っても API へは 1 秒に 1 回程度です。
+   - `ready` かつロビーに入り終えている → `w-<uuid>` を登録して `CreateConnectionRequest(...).ConnectWithIndication(ctx)` (15 秒の期限付き)。
+     失敗したら少し置いて再試行し、3 回失敗したら「ワールドに接続できませんでした…」で切断。
+   - `absent` (起動中に reaper に消された等) → 5 秒以上空けて ensure し直す。
+   - 見つからなくなった → 切断。API のエラーは間隔を空けて待ち続ける。
+   - `STARTUP_WAIT` (既定 5 分、コントローラーの `STARTUP_TIMEOUT` に揃える) を過ぎたら「起動に時間が掛かりすぎています…」で切断。
+   - プレイヤーが切断するとループは終わります (ゴルーチンを残しません)。
+6. **ワールドから落とされたとき** (`KickedFromServerEvent`、クラッシュ・再起動など): 理由が BAN・ホワイトリスト・管理者のキック・二重ログインに見えなければ、
+   ロビーへ戻して「ワールドとの接続が切れました。再起動を待っています…」と表示し、待機ループをやり直します (5 秒置いてから接続。1 プレイヤーにつき 3 回まで)。
+   ロビーから移る途中の失敗は、Gate の英語の既定文言を「ワールドへの接続に失敗しました。再試行しています…」に差し替え、待機ループが数えて再試行します。
+   ロビーから落とされたときは Gate の既定どおり切断します。
+7. ロビーとワールドは Velocity modern forwarding (共通の秘密 `worlds-forwarding`) だけを受け付けるので、Gate を経由しない接続は入れません。
 
-`LISTEN_MINECRAFT` で Gate から転送された接続を受けます (PROXY protocol なし)。
+ロビー (`lobby`) は ArgoCD が管理する常設の ianua-silvae で、コントローラーは触りません
+(`app.kubernetes.io/managed-by=moripa-worlds` を付けると reaper に消されるので付けないこと)。
 
-1. Handshake を読みます (1 KiB まで・5 秒以内)。サーバーアドレスは Gate と同じ規則で正規化します (Forge の `\0FML…` 以降と `///` 以降を除き、前後の `.` を削って小文字化)。
-2. `<id><WORLD_HOST_SUFFIX>` の `<id>` が小文字の正規形 UUID (version 7・variant 10) でなければ「見つかりません」。
-3. `S3_PREFIX<id>/info.json` を GetObject で読みます (見つかった結果は 30 秒、見つからなかった結果は 10 秒キャッシュ。同じ ID への同時問い合わせは 1 回にまとめます)。
-   ない・不正・`delete_at` を過ぎている場合は「見つかりません」。
-4. ステータス ping (next state 1) ならワールドは作りません。informer のキャッシュにワールドがあれば「起動しています…」、なければ「停止中」と返します (API は叩きません)。
-5. ログインならワールドがなければ作ります。`MAX_WORLDS` に達している、または作成のレート制限 (全体で 10 回/分) に掛かった場合は「混み合っています」。
-   満杯・レート制限の判定はまず informer のキャッシュとトークン数で行い、そこで断る場合は API もロックも使いません。
+### サーバーリスト (ping)
 
-ping でワールドを作らないのは、ping が認証 (Mojang アカウント) なしで送れるためです。ping で作ると、知っている (共有された、または自分でアップロードした) ID に
-数分おきに ping するだけで `MAX_WORLDS` の枠を埋め続け、ほかのプレイヤーを「混み合っています」で締め出せてしまいます。
-waker からはクライアントの IP が見えない (Gate は backend に PROXY protocol を送らない) ので、IP ごとの制限では防げません。
+ping ではワールドを作りません (認証なしで送れるため、作ると `MAX_WORLDS` の枠を埋め続けられる)。
+状態は ID ごとに 5 秒キャッシュし、同時の問い合わせは 1 回にまとめます。バージョンは常に `26.3` (protocol 777) と答えます。
 
-| 状況 | サーバーリスト (MOTD) | ログイン (切断メッセージ) |
-| --- | --- | --- |
-| 停止中 (ping のみ) | `<title>` + 改行 + `停止中です。参加すると起動します` (version 名 `sleeping`) | (ログインでは起動するので該当なし) |
-| 起動した / 起動中 | `<title> を起動しています…` (version 名 `starting`、プロトコル番号はクライアントのものを返すので互換ありと表示) | `ワールドを起動しています。10〜30秒後に再接続してください` |
-| 見つからない | `ワールドが見つかりません` (赤) | `ワールドが見つかりません: <id>` (赤) |
-| 上限・レート制限 | (ping では起動しないので該当なし) | `現在混み合っています。しばらくしてから再接続してください` |
-| S3 / Kubernetes のエラー | `ワールドを起動できませんでした。しばらくしてから再接続してください` (赤) | 同左 |
+| 状況 | MOTD |
+| --- | --- |
+| 起動済み | `<title>` + 改行 + `§7プレイ可能` |
+| 起動中 | `<title>` + 改行 + `§e起動中…` |
+| 停止中 | `<title>` + 改行 + `§7参加すると起動します` |
+| 見つからない | `§cワールドが見つかりません` |
+| ワールドのホスト名でない | `§cこのアドレスでは接続できません` |
+| API のエラー | `§c状態を確認できません` |
 
-人数は `0/20` を返します。Ping Request には Pong を返します (Gate Lite は Pong を自分で返すので、直接接続したときだけ使われます)。
-next state 3 (transfer) はログインと同じ扱いです。
+タイトルからは `§` と改行を取り除き 48 文字で切ります (アップロードした人が色や 2 行目を乗っ取れないように)。
+人数はこの Gate 上でそのワールドにいる人数 / 20 です。アイコンは Gate の設定の `status.favicon` (Gate の既定のアイコンなら出さない)。
+
+## コントローラーの API
+
+`LISTEN_HTTP` (`:8080`) で `/healthz` `/readyz` `/metrics` と同じポートに出します。`/v1/` 以下は `Authorization: Bearer <API_TOKEN>` が必要で、
+トークンは SHA-256 にしてから定数時間で比較します (違えば `401` と `WWW-Authenticate`)。`{id}` は小文字の正規形 UUID v7 だけ (それ以外は `400`)。
+
+```http
+GET  /v1/worlds/{id}
+POST /v1/worlds/{id}/ensure
+```
+
+```json
+{"id":"0199c8a0-7b3e-7f12-9a4c-1d2e3f405162","found":true,"title":"ロビーの噴水","state":"starting",
+ "address":"w-0199c8a0-7b3e-7f12-9a4c-1d2e3f405162.worlds.svc.cluster.local:25565","result":"created"}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `found` | `info.json` があり、不正でなく、`delete_at` を過ぎていない。`false` なら `title` は `null`、`state` は `absent` |
+| `title` | info.json の `title` (未設定なら `null`) |
+| `state` | `absent` (Deployment が無い) / `starting` (Deployment はあるが ready でない。削除中も含む) / `ready` (Deployment の Pod が Ready、かつワールドがステータス ping に応答する。成功は 2 秒覚える) |
+| `address` | Gate が接続するアドレス |
+| `result` | ensure のときだけ: `created` / `existing` / `full` (`MAX_WORLDS`) / `rate_limited` (作成 10 回/分) / `not_found` / `error` |
+
+GET は S3 のエラーのとき `503`。POST は S3 / Kubernetes のエラーでも `200` で `result: "error"` を返します。`created` の直後は informer にまだ見えないので `state: "starting"` を返します。
+`MAX_WORLDS` とレート制限はコントローラーだけが持ちます (プロキシは結果を表示するだけ)。
 
 ### 作られるオブジェクト
 
@@ -71,9 +125,13 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
     schematic のブロックは `schematicOrigin + Offset + (x, y, z)` に置かれ、Offset は info.json に無いのでコントローラーでは決められません。
   - `voidY`: `min(WORLD_ORIGIN_Y + min(spawn_position.y, 0) - world_size.height, -64) - 32` (`voidDepth` を知らない古い ianua-silvae 向けの保険。ブロックが置かれうる最低の y=-64 より下)
   - `motd`: `{"description": title (なければ "morino.party world"), "maxPlayers": 20}`、`onlineMode: true`、`velocitySecret: null`
+    (秘密は ConfigMap に書かず、下の環境変数で渡す)
 - **Deployment** (replicas 1、Recreate): `WORLD_IMAGE` を UID/GID 10001・readOnlyRootFilesystem・capabilities なし・seccomp RuntimeDefault で動かします。
   PVC `WORLD_SCHEMATICS_PVC` を `/schematics` に読み取り専用で、ConfigMap を `/server/config` に、emptyDir を `/tmp` にマウントします。
   initContainer (`busybox:1.37`) が schematic 本体が見えるまで最大 120 秒待ちます (geesefs は一覧を ~10 秒キャッシュするため)。
+  環境変数 `IANUA_VELOCITY_SECRET` を Secret `FORWARDING_SECRET_NAME` (既定 `worlds-forwarding`) のキー `secret` から渡します。
+  これがあると ianua-silvae は Velocity modern forwarding の接続だけを受け付け、自分では認証しません (`IANUA_ONLINE_MODE` は無視されます)。
+  Secret が無いと Pod は `CreateContainerConfigError` で起動しません (認証なしで開くよりよいため)。
   ServiceAccount トークンと Service リンクの環境変数は渡しません。`worlds.morino.party/last-active` アノテーションに最後にプレイヤーがいた時刻を、
   `worlds.morino.party/played=true` アノテーションに一度でもプレイヤーがいたことを記録します。
 - **Service** (ClusterIP、`25565/TCP` 名前 `minecraft`)。
@@ -93,7 +151,7 @@ ConfigMap と Service には Deployment の ownerReference を付けるので、
 S3 に一時的に繋がらない場合は削除しません。
 Ready かどうかに関わらず、info.json が有効なワールドの ConfigMap / Service が欠けていたり、前の世代のもの
 (ownerReference の UID が今の Deployment と違う) だったりすれば作り直します。
-作成 (waker) と削除 (reaper / sweeper) は同じロックで直列化し、作成時に同名の消し残しがあれば UID を確かめて作り直します。
+作成 (API の ensure) と削除 (reaper / sweeper) は同じロックで直列化し、作成時に同名の消し残しがあれば UID を確かめて作り直します。
 
 ### 期限切れ schematic の削除 (sweeper)
 
@@ -116,21 +174,24 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 
 ## 環境変数
 
+### controller
+
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `NAMESPACE` | (必須) | ワールドを作る namespace。Downward API で渡す |
-| `WORLD_HOST_SUFFIX` | `.world.site1.dev.morino.party` | ホスト名から ID を取り出すときのサフィックス (先頭の `.` 込み) |
-| `LISTEN_MINECRAFT` | `:25565` | waker の待ち受け |
-| `LISTEN_HTTP` | `:8080` | `/healthz` `/readyz` `/metrics` |
+| `API_TOKEN` | (必須、16 文字以上) | プロキシが API を呼ぶときの Bearer トークン。Secret `moripa-worlds-api` の `token` から渡す |
+| `WORLD_HOST_SUFFIX` | `.world.site1.dev.morino.party` | (ログ用) |
+| `LISTEN_HTTP` | `:8080` | API と `/healthz` `/readyz` `/metrics` |
 | `S3_ENDPOINT` | `http://rustfs-svc.rustfs.svc.cluster.local:9000` | S3 エンドポイント (常に path-style) |
 | `S3_REGION` | `us-east-1` | |
 | `S3_BUCKET` | `moripa-utils` | |
 | `S3_PREFIX` | `schematics/` | |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | (必須) | Secret `moripa-worlds-s3` から渡す |
-| `WORLD_IMAGE` | (必須) | 例: `ghcr.io/morinoparty/ianua-silvae:main` |
+| `WORLD_IMAGE` | (必須) | 例: `ghcr.io/morinoparty/ianua-silvae:main@sha256:…` |
 | `WORLD_SCHEMATICS_PVC` | `schematics` | `moripa-utils/schematics` を読み取り専用でマウントする PVC |
 | `WORLD_ORIGIN_Y` | `64` | schematic を貼り付ける Y |
 | `WORLD_MEMORY_REQUEST` / `WORLD_MEMORY_LIMIT` | `384Mi` / `768Mi` | ワールドのメモリ |
+| `FORWARDING_SECRET_NAME` | `worlds-forwarding` | ワールドの Pod に `IANUA_VELOCITY_SECRET` として渡す Secret (キー `secret`) |
 | `MAX_WORLDS` | `6` | 同時に存在できるワールドの数 (既存の `w-*` Deployment を数える) |
 | `IDLE_TIMEOUT` | `10m` | 0 人のまま経ったら削除するまでの時間 |
 | `UNJOINED_TIMEOUT` | `3m` | 一度もプレイヤーが入らないまま (Ready から) 経ったら削除するまでの時間。`IDLE_TIMEOUT` 以上なら `IDLE_TIMEOUT` と同じ扱い |
@@ -139,85 +200,118 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 | `DELETE_EXPIRED` | `true` | sweeper を動かすか |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` (ログは JSON) |
 
-固定のパラメーター: reaper の間隔 30 秒、作成のレート制限 10 回/分 (バースト 10)、読み取りの期限 5 秒、同時接続数 256。
+固定のパラメーター: reaper の間隔 30 秒、作成のレート制限 10 回/分 (バースト 10)、ステータス ping の期限 3 秒。
+ロビーにいるプレイヤーはワールドのステータス ping の人数に入らないので、待っている間に idle / unjoined と判定されることはありません
+(起動中は Ready でないので reaper はまだ人数を見ません)。
 
-## 必要な権限
+### proxy
 
-- ServiceAccount `moripa-worlds` に namespace `worlds` の Role:
-  `deployments` (apps) / `services` / `configmaps` に `get, list, watch, create, update, patch, delete`、`pods` に `get, list, watch`。
-- S3 のキー: `moripa-utils/schematics/*` に `s3:GetObject` / `s3:DeleteObject`、バケット `moripa-utils` に `s3:ListBucket` / `s3:GetBucketLocation`。
-  (この権限だけのキーで RustFS 1.0.1 に対して統合テストが通ること、PutObject が拒否されることを確認済み)
+| 変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `API_TOKEN` | (必須、16 文字以上) | controller と同じトークン |
+| `FORWARDING_SECRET` | (必須、16 文字以上) | Velocity modern forwarding の秘密。Secret `worlds-forwarding` の `secret` から渡す。**Gate の設定ファイルには書かない** |
+| `API_URL` | `http://moripa-worlds.worlds.svc.cluster.local:8080` | controller の API |
+| `GATE_CONFIG` | `/etc/gate/config.yml` | Gate の設定ファイル (ConfigMap) |
+| `WORLD_HOST_SUFFIX` | `.world.site1.dev.morino.party` | ホスト名から ID を取り出すときのサフィックス (先頭の `.` 込み) |
+| `LOBBY_SERVER` | `lobby` | ロビーのサーバー名 (Gate の設定の `servers` のキー) |
+| `REQUIRED_PROTOCOL` / `REQUIRED_VERSION_NAME` | `777` / `26.3` | 受け付ける唯一のクライアントのバージョン (ianua-silvae に合わせる) |
+| `STARTUP_WAIT` | `5m` | ロビーで待つ上限。controller の `STARTUP_TIMEOUT` に揃える |
+| `LISTEN_HTTP` | `:8080` | `/healthz` `/readyz` (常に 200) `/metrics` |
+| `LOG_LEVEL` | `info` | Gate のログもこの JSON ログに出ます |
 
-## Gate Lite の設定
+固定のパラメーター: 状態の確認 1 秒ごと、アクションバー 2 秒ごと、ワールドへの接続 15 秒 × 3 回、API の呼び出し 3 秒、ping の状態キャッシュ 5 秒、
+ワールドから落とされたときのロビーへの戻し 3 回まで、誰もいないワールドのサーバー登録は 10 分ごとに外す。
 
-Gate (`ghcr.io/minekube/gate:v0.74.32`) は設定ファイルのトップレベルに `config:` キーを置き、その下に `lite:` を書きます。
-`--config <path>` (または環境変数 `GATE_CONFIG`) で読み込み、ファイルの変更は自動で再読み込みされます。
+## Gate の設定 (proxy)
+
+`GATE_CONFIG` のファイルを Gate の `LoadConfig` で読み、`FORWARDING_SECRET` を `forwarding.velocitySecret` に差し込んでから起動します。
+次を満たさない設定では起動しません: `lite.enabled: false`、`forwarding.mode: velocity`、ファイルに `velocitySecret` を書かない、
+`servers` に `LOBBY_SERVER` がある、`try` と `forcedHosts` が空、`via.enabled: false`、`api` と `connect` が無効。
+組み込みコマンド (`/server` など) はプラグインが無効にします (他のワールドやロビーへ自分で移れないように)。
 
 ```yaml
 config:
   bind: 0.0.0.0:25565
-  # HAProxy から PROXY protocol v2 で受ける
+  onlineMode: true
+  # HAProxy から PROXY protocol v2 で受ける。信頼する送信元は既定 (ループバック・プライベート・リンクローカル) のまま
   proxyProtocol: true
+  forwarding:
+    mode: velocity        # 秘密は環境変数 FORWARDING_SECRET から
+  servers:
+    lobby: lobby.worlds.svc.cluster.local:25565
+  try: []                 # 振り分けはプラグインが行う
   lite:
-    enabled: true
-    routes:
-      - host: '*.world.site1.dev.morino.party'
-        backend:
-          - 'w-$1.worlds.svc.cluster.local:25565'
-          - 'moripa-worlds.worlds.svc.cluster.local:25565'
-        strategy: sequential
-        # ステータス応答をキャッシュしない (下記)
-        cachePingTTL: -1s
-        # 元のホスト名のまま転送する (waker がホスト名から ID を読む)
-        modifyVirtualHost: false
-        # backend には PROXY protocol を送らない (ianua-silvae / waker は受けない)
-        proxyProtocol: false
+    enabled: false
+  status:
+    showMaxPlayers: 20
 ```
 
-`lite.routes[]` のフィールド: `host` (文字列または配列、`*` と `?` が使え、それぞれ `$1`, `$2`… に入る)、`backend` (文字列または配列)、
-`strategy` (`sequential` / `random` / `round-robin` / `least-connections` / `lowest-latency`)、`cachePingTTL` (既定 10s、負の値でキャッシュ無効)、
-`fallback` (全 backend に繋がらないときのステータス応答)、`proxyProtocol`、`tcpShieldRealIP`、`modifyVirtualHost`。
-ホスト名の照合は小文字化して行いますが、backend に転送するハンドシェイクは元のまま (大文字・`\0FML3\0`・末尾の `.` も) です。
+`config.quota` (接続 5 回/秒・ログイン 0.4 回/秒、IP ごと) は既定で有効で、PROXY protocol で渡された実際のクライアント IP に掛かります。
 
-> [!NOTE]
-> **`cachePingTTL` は負の値 (`-1s`) にしてステータス応答のキャッシュを無効にしています。**
-> Gate Lite のキャッシュは backend のアドレス (とプロトコル番号) ごとで、ホスト名を含みません。waker のアドレスはすべてのワールドで共通なので、
-> 正の値 (例えば `3s`) だと、あるワールドへのステータス ping の応答が TTL 以内の別のワールドへのステータス ping にもそのまま返り、
-> 後者は waker に届きません (= ワールドが起動せず、MOTD も別のワールドのもの。存在するワールドに「ワールドが見つかりません」と出ることもある)。
-> Gate v0.74.32 で `3s` ではこうなり、`-1s` では毎回 waker に届くことを確認しました (`hack/gate-e2e` 参照)。
-> ログインはもともとキャッシュされません。キャッシュを切っても負荷は waker の info.json キャッシュ (30 秒 / 10 秒) が吸収します。
+> [!WARNING]
+> **Gate v0.74.32 の classic モードの `connectionTimeout` / `readTimeout` は効きません。**
+> `configutil.Duration` は既にナノ秒の `time.Duration` なのに、`time.Duration(cfg.ConnectionTimeout)*time.Millisecond` のように
+> もう一度 `time.Millisecond` を掛けている箇所があり (`pkg/edition/java/proxy/proxy.go` の `withConnectionTimeout` とクライアント接続の
+> 読み書きの期限、`switch.go` のキック後のリダイレクト)、`5s` が約 58 日、`30s` が約 8 時間になります。
+> このためプラグインはワールドへの接続に必ず自分の期限 (15 秒) を掛け、Gate の値には頼りません。
+> Gate が自分で掛ける接続 (起動済みのワールドへの最初の接続・ロビーへの接続・キック後のロビーへのリダイレクト) は実質期限なしなので、
+> 接続先がパケットを捨てる (応答しない) と止まったままになります。ワールドは API が ping で確かめてから `ready` にし、
+> ロビーとワールドは同じ namespace の ClusterIP (落ちていれば Cilium が即座に reject) なので、通常は問題になりません。
 
-- `config.proxyProtocol: true` でも、PROXY ヘッダーのない接続も受け付けます (Gate v0.74.32 で確認)。
-  ヘッダーを信頼する送信元は `config.proxyProtocolTrustedProxies` で、既定はループバックとプライベート / リンクローカルの範囲だけです。
-  HAProxy からの接続が Gate にどの送信元 IP で見えるか (NodePort の SNAT 後のアドレス) を確認し、必要なら明示してください。
-- `config.quota.connections` (同じ /24 から 5 回/秒、バースト 10) は既定で有効です。PROXY protocol で渡された実際のクライアント IP に掛かります。
-- `w-$1` が名前解決できないとき Gate は INFO で `failed to try backend` を記録します (起動していないワールドへの接続ごとに 1 行)。
+### ビルドタグ `musl`
+
+Gate の ViaLite (`go.minekube.com/vialite`) は purego 経由で `libdl` を動的リンクさせるため、`CGO_ENABLED=0` でも
+distroless/static では起動できません。Gate 自身の musl ビルドと同じ `-tags musl` で ViaLite と OpenTelemetry を外して静的バイナリにしています
+(`Dockerfile`・`make build`。動的リンクに戻ると `docker build` が失敗します)。`go test` / `go vet` はタグなしでも通ります。
+
+## 必要な権限・Secret
+
+- controller: ServiceAccount `moripa-worlds` に namespace `worlds` の Role:
+  `deployments` (apps) / `services` / `configmaps` に `get, list, watch, create, update, patch, delete`、`pods` に `get, list, watch`。
+  S3 のキー: `moripa-utils/schematics/*` に `s3:GetObject` / `s3:DeleteObject`、バケット `moripa-utils` に `s3:ListBucket` / `s3:GetBucketLocation`。
+- proxy: 権限なし (`automountServiceAccountToken: false`)。S3 のキーも渡さない。
+- Secret `worlds-forwarding` (`secret`: 32 文字以上のランダム): proxy の `FORWARDING_SECRET`、ロビーとワールドの `IANUA_VELOCITY_SECRET`。
+- Secret `moripa-worlds-api` (`token`: 40 文字程度のランダム): proxy と controller の `API_TOKEN`。
+
+Deployment はそれぞれ `args: [proxy]` / `args: [controller]` で起動します (引数なしでは使い方を表示して終了します)。
+proxy は `25565` (Minecraft) と `8080` (メトリクス)、controller は `8080` (API・メトリクス) だけを使います (controller の `25565` は廃止)。
 
 ## メトリクス
+
+controller (`:8080/metrics`):
 
 | 名前 | 種類 | ラベル |
 | --- | --- | --- |
 | `worlds_running` | gauge | 現在のワールド (管理対象 Deployment) の数 |
-| `waker_connections_total` | counter | `state` (`status` / `login` / `unknown`)、`result` (`created` / `starting` / `sleeping` / `not_found` / `busy` / `error` / `bad_request`) |
+| `api_requests_total` | counter | `op` (`state` / `ensure`)、`result` (`absent` / `starting` / `ready` / `not_found` / `created` / `existing` / `full` / `rate_limited` / `error` / `bad_request` / `unauthorized`) |
 | `worlds_created_total` | counter | |
 | `worlds_reaped_total` | counter | `reason` (`idle` / `unjoined` / `startup_timeout` / `schematic_missing` / `expired` / `swept`) |
 | `schematics_swept_total` | counter | |
 
 `/readyz` は Deployment の informer が同期済みで、S3 に ListObjectsV2 できるときだけ 200 を返します。
 
+proxy (`:8080/metrics`):
+
+| 名前 | 種類 | ラベル |
+| --- | --- | --- |
+| `players_waiting` | gauge | ロビーでワールドの起動を待っている人数 |
+| `world_connects_total` | counter | `result` (`success` / `failed` (再試行する) / `gave_up` / `timeout` / `not_found` / `busy` / `error`) |
+| `logins_total` | counter | `result` (`world` / `lobby` / `disconnect` / `denied_host` / `denied_version`) |
+
 ## セキュリティ
 
-- waker はインターネットから直接届かない前提です (Gate からのみ)。PROXY protocol を受けないので、
-  NetworkPolicy で `25565` への ingress を Gate の Pod に、`8080` を監視系に絞ってください。
-- 受け取るパケットは長さを確保前に検査し (ハンドシェイク 1 KiB、Login Start 4 KiB)、各パケット 5 秒で打ち切ります。不正なパケットではパニックせず接続を閉じます。
-- クライアントの IP は Gate が隠すので IP ごとの制限はできません。代わりにワールドの作成をログインに限り (認証なしのステータス ping では作らない)、
-  作成を全体で 10 回/分に制限し、`MAX_WORLDS` で上限を掛け、参加されないワールドは `UNJOINED_TIMEOUT` で早めに片付けます。
-  既に存在するワールドへの接続と、満杯・レート制限で断る接続は API を叩かず informer のキャッシュで答えます。
-- ID は正規形の UUID v7 だけを受け付けるので、Kubernetes の名前・S3 のキー・パスに任意の文字列が入ることはありません。
+- 認証は Gate (Mojang) だけが行い、ロビーとワールドは Velocity modern forwarding の HMAC を確かめて Gate 経由の接続だけを受け付けます。
+  秘密は Secret から環境変数で渡し、ConfigMap (Gate の設定・ワールドの config.json) には書きません。
+- ワールドを作るのは認証済みのプレイヤーのログインだけです (ping・認証前の段階では作らない)。
+  ホスト名とバージョンは認証の前に確かめるので、関係のない接続で Mojang に問い合わせることもありません。
+  作成は全体で 10 回/分、`MAX_WORLDS` で上限を掛け、参加されないワールドは `UNJOINED_TIMEOUT` で早めに片付けます。
+- proxy は Kubernetes の権限も S3 のキーも持たず、controller の API (トークン必須、定数時間比較) だけを使います。
+  インターネットに面する proxy が乗っ取られても、ワールドの作成 (上限・レート制限付き) 以上のことはできません。
+- API の `{id}` とホスト名の ID は正規形の UUID v7 だけを受け付けるので、Kubernetes の名前・S3 のキー・パスに任意の文字列が入ることはありません。
   info.json の `file_name` も `[A-Za-z0-9._-]` (先頭 `.` 不可、128 文字まで) だけを受け付け、initContainer にはシェルに埋め込まず環境変数で渡します。
-- ワールドの Pod は Pod Security Standards の restricted を満たす設定で、ServiceAccount トークンを持ちません。
-- コントローラーの権限は namespace `worlds` 内に限られ、S3 のキーも `schematics/*` の読み取りと削除だけです。
-- コンテナイメージは distroless (static、nonroot) です。
+- NetworkPolicy の想定: proxy の egress は DNS・controller の `8080`・ロビー / ワールドの `25565`・インターネットの `443` (Mojang)。
+  ロビー / ワールドの ingress は proxy と controller (ステータス ping) からの `25565` だけ。controller の ingress は proxy と監視系からの `8080` だけ。
+- ワールド・ロビー・proxy・controller の Pod は Pod Security Standards の restricted を満たす設定です。コンテナイメージは distroless (static、nonroot) です。
 
 ## 開発
 
@@ -232,19 +326,21 @@ make build image       # bin/moripa-worlds / コンテナイメージ
 
 本番と同じ権限のキーで統合テストを流す方法は `internal/schematic/integration_test.go` の先頭を参照してください。
 
-### Gate との結合確認
-
-`hack/devwaker` は Kubernetes と S3 なしで waker だけを動かします (既知の ID を引数で渡し、作成は記録するだけ)。
+### 結合確認 (docker だけ)
 
 ```sh
-docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/src -w /src -e CGO_ENABLED=0 golang:1.26 go build -o bin/devwaker ./hack/devwaker
-./bin/devwaker -listen 127.0.0.1:35566 -known 0199c8a0-7b3e-7f12-9a4c-1d2e3f405162 &
-docker run -d --name gate --network host -v $PWD/hack/gate-e2e/config.yml:/config.yml:ro ghcr.io/minekube/gate:v0.74.32 --config /config.yml
-python3 -I hack/gate-e2e/mcclient.py 127.0.0.1 35565 '0199C8A0-7B3E-7F12-9A4C-1D2E3F405162.world.site1.dev.morino.party\0FML3\0' status --proxy-v2
-python3 -I hack/gate-e2e/mcclient.py 127.0.0.1 35565 '0199c8a0-7b3e-7f12-9a4c-1d2e3f405162.world.site1.dev.morino.party.' login --proxy-v2
+sh hack/e2e/run.sh          # KEEP=1 で終わってもコンテナを残す
 ```
 
-`hack/gate-e2e/config.yml` は本番の route と同じ形で、1 つ目の backend を `w-$1.invalid:25565` (必ず NXDOMAIN) にしています。
+docker ネットワーク `mwe2e` に次を置き、`hack/e2e/mcclient.py` (標準ライブラリだけの最小クライアント、`python3 -I` で動く) で確かめます。
+
+- `devcontroller` (`hack/devcontroller`): 本物の API ハンドラーをメモリ上のワールドで動かす。ensure から `-ready-after` (15 秒) 経ち、`world:25565` が ping に応答したら `ready`。
+- `gate`: このリポジトリのイメージの `proxy` (`hack/e2e/config.yml`。`onlineMode: false`・`proxyProtocol: false`・quota なし)。
+- `lobby` / `world`: `ghcr.io/morinoparty/ianua-silvae` (26.3) に `IANUA_VELOCITY_SECRET` と小さな schematic を渡したもの。
+
+確かめること: 停止中 / 見つからない / ワールドでないホストの MOTD、26.2 (776) とワールドでないホストと存在しないワールドのログインが断られること、
+ログイン → ロビー (CONFIG → PLAY) → 起動中の MOTD → アクションバー → Start Configuration で world へ移る (2 回目の Join Game) → 起動後の MOTD。
+`docker restart mwe2e-world` でワールドを落とすと、ロビーへ戻って「ワールドとの接続が切れました…」が出て、起動後にワールドへ戻ります。
 
 ## ライセンス
 
