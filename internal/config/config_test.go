@@ -34,7 +34,7 @@ func TestDefaults(t *testing.T) {
 	if c.WorldSchematicsPVC != "schematics" || c.WorldOriginY != 64 || c.WorldMemoryRequest.String() != "384Mi" || c.WorldMemoryLimit.String() != "768Mi" {
 		t.Errorf("world defaults: %+v", c)
 	}
-	if c.MaxWorlds != 6 || c.IdleTimeout != 10*time.Minute || c.UnjoinedTimeout != 3*time.Minute || c.StartupTimeout != 3*time.Minute || c.SweepInterval != time.Hour || !c.DeleteExpired || c.LogLevel != slog.LevelInfo {
+	if c.MaxWorlds != 6 || c.IdleTimeout != 10*time.Minute || c.UnjoinedTimeout != 3*time.Minute || c.StartupTimeout != 5*time.Minute || c.SweepInterval != time.Hour || !c.DeleteExpired || c.LogLevel != slog.LevelInfo {
 		t.Errorf("loop defaults: %+v", c)
 	}
 }

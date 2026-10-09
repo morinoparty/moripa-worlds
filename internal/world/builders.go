@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -287,8 +288,9 @@ func BuildDeployment(s Settings, info *schematic.Info, now time.Time) *appsv1.De
 						},
 					}},
 					Containers: []corev1.Container{{
-						Name:  "server",
-						Image: s.Image,
+						Name:            "server",
+						Image:           s.Image,
+						ImagePullPolicy: worldPullPolicy(s.Image),
 						Env: []corev1.EnvVar{
 							{Name: "IANUA_ONLINE_MODE", Value: "true"},
 							{Name: "IANUA_BIND", Value: "0.0.0.0"},
@@ -337,4 +339,13 @@ func BuildDeployment(s Settings, info *schematic.Info, now time.Time) *appsv1.De
 			},
 		},
 	}
+}
+
+// worldPullPolicy はワールドのイメージの取得方針を決める。
+// ダイジェスト固定なら IfNotPresent、タグ指定(:main など動くタグ)ならノードに古いイメージが残らないよう Always
+func worldPullPolicy(image string) corev1.PullPolicy {
+	if strings.Contains(image, "@sha256:") {
+		return corev1.PullIfNotPresent
+	}
+	return corev1.PullAlways
 }

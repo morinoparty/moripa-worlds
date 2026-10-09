@@ -123,7 +123,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MaxWorlds:          integer("MAX_WORLDS", 6, 0),
 		IdleTimeout:        duration("IDLE_TIMEOUT", 10*time.Minute),
 		UnjoinedTimeout:    duration("UNJOINED_TIMEOUT", 3*time.Minute),
-		StartupTimeout:     duration("STARTUP_TIMEOUT", 3*time.Minute),
+		StartupTimeout:     duration("STARTUP_TIMEOUT", 5*time.Minute),
 		SweepInterval:      duration("SWEEP_INTERVAL", time.Hour),
 		DeleteExpired:      boolean("DELETE_EXPIRED", true),
 	}

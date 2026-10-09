@@ -134,7 +134,7 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 | `MAX_WORLDS` | `6` | 同時に存在できるワールドの数 (既存の `w-*` Deployment を数える) |
 | `IDLE_TIMEOUT` | `10m` | 0 人のまま経ったら削除するまでの時間 |
 | `UNJOINED_TIMEOUT` | `3m` | 一度もプレイヤーが入らないまま (Ready から) 経ったら削除するまでの時間。`IDLE_TIMEOUT` 以上なら `IDLE_TIMEOUT` と同じ扱い |
-| `STARTUP_TIMEOUT` | `3m` | Ready にならなかったら削除するまでの時間 |
+| `STARTUP_TIMEOUT` | `5m` | Ready にならなかったら削除するまでの時間 |
 | `SWEEP_INTERVAL` | `1h` | sweeper の間隔 |
 | `DELETE_EXPIRED` | `true` | sweeper を動かすか |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` (ログは JSON) |
