@@ -257,6 +257,15 @@ func TestRepairRecreatesMissingChildren(t *testing.T) {
 	if err != nil || !ownedBy(svc, d.UID) {
 		t.Fatalf("service = %+v, %v", svc, err)
 	}
+	// 揃っていれば Create を投げない。
+	creates := 0
+	cs.PrependReactor("create", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		creates++
+		return false, nil, nil
+	})
+	if err := m.Repair(ctx, infoWithID(id1), d); err != nil || creates != 0 {
+		t.Fatalf("Repair on healthy world: err = %v, creates = %d", err, creates)
+	}
 	// Deployment が別物に置き換わっていたら何もしない。
 	if err := cs.CoreV1().Services("worlds").Delete(ctx, "w-"+id1, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)

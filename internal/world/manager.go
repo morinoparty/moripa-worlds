@@ -171,6 +171,20 @@ func (m *Manager) Repair(ctx context.Context, info *schematic.Info, d *appsv1.De
 	if cur.UID != d.UID || cur.DeletionTimestamp != nil {
 		return nil
 	}
+	// ふだんは揃っているので、まず読むだけで確かめる (30 秒ごとに無駄な Create を投げない)。
+	ns := m.Settings.Namespace
+	cm, cmErr := m.Client.CoreV1().ConfigMaps(ns).Get(ctx, d.Name, metav1.GetOptions{})
+	svc, svcErr := m.Client.CoreV1().Services(ns).Get(ctx, d.Name, metav1.GetOptions{})
+	if cmErr == nil && svcErr == nil && ownedBy(cm, cur.UID) && ownedBy(svc, cur.UID) &&
+		cm.DeletionTimestamp == nil && svc.DeletionTimestamp == nil {
+		return nil
+	}
+	for _, err := range []error{cmErr, svcErr} {
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("world: get children of %s: %w", d.Name, err)
+		}
+	}
+	m.logger().Info("repairing world objects", "id", info.ID)
 	return m.createChildren(ctx, info, cur)
 }
 
