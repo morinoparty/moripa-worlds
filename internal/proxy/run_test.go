@@ -63,6 +63,7 @@ func TestLoadGateConfigRejects(t *testing.T) {
 		{"no secret", goodConfig, "", "FORWARDING_SECRET"},
 		{"no lobby", strings.Replace(goodConfig, "lobby:", "hub:", 1), "s", `lobby "lobby"`},
 		{"try", strings.Replace(goodConfig, "try: []", "try: [lobby]", 1), "s", "try"},
+		{"via", goodConfig + "  via:\n    enabled: true\n", "s", "via.enabled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

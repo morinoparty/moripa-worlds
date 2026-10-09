@@ -44,7 +44,7 @@ tidy:
 
 build: ## bin/moripa-worlds を作る
 	@mkdir -p $(CACHE) bin
-	$(DOCKER) -e CGO_ENABLED=0 $(GO_IMAGE) go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/moripa-worlds ./cmd/moripa-worlds
+	$(DOCKER) -e CGO_ENABLED=0 $(GO_IMAGE) go build -trimpath -tags musl -ldflags "-s -w -X main.version=$(VERSION)" -o bin/moripa-worlds ./cmd/moripa-worlds
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .

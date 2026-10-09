@@ -2,7 +2,6 @@
 .github
 bin
 dist
-hack/gate-e2e
 *.md
 !README.md
 .cache

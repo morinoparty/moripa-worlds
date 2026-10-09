@@ -1,0 +1,23 @@
+# moripa-worlds proxy の結合確認用 Gate 設定 (hack/e2e/run.sh)。本番 (kubernetes の gate-config) との違い:
+#   - onlineMode: false (テストのクライアントは Mojang の認証をしない)
+#   - proxyProtocol: false (HAProxy を挟まない)
+#   - quota を切る (同じ IP から数秒で何度もログインするため)
+# Velocity の秘密はここに書かず、環境変数 FORWARDING_SECRET で渡す。
+config:
+  bind: 0.0.0.0:25565
+  onlineMode: false
+  proxyProtocol: false
+  forwarding:
+    mode: velocity
+  servers:
+    lobby: lobby:25565
+  try: []
+  lite:
+    enabled: false
+  quota:
+    connections:
+      enabled: false
+    logins:
+      enabled: false
+  status:
+    showMaxPlayers: 20

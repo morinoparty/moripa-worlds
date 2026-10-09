@@ -58,6 +58,9 @@ func PrepareGateConfig(cfg *gconfig.Config, forwardingSecret, lobby string) erro
 	if len(c.Try) != 0 || len(c.ForcedHosts) != 0 {
 		errs = append(errs, errors.New("try and forcedHosts must be empty (the plugin chooses servers)"))
 	}
+	if c.Via.Enabled {
+		errs = append(errs, errors.New("via.enabled must be false (built without ViaLite)"))
+	}
 	if cfg.API.Enabled || cfg.Connect.Enabled {
 		errs = append(errs, errors.New("api and connect must be disabled"))
 	}
