@@ -148,6 +148,7 @@ func runController() error {
 			Image:         cfg.WorldImage,
 			SchematicsPVC: cfg.WorldSchematicsPVC,
 			OriginY:       cfg.WorldOriginY,
+			CPURequest:    cfg.WorldCPURequest,
 			MemoryRequest: cfg.WorldMemoryRequest,
 			MemoryLimit:   cfg.WorldMemoryLimit,
 

@@ -76,11 +76,23 @@ type Settings struct {
 	Image         string
 	SchematicsPVC string
 	OriginY       int
+	// CPURequest はワールドの CPU の request。ゼロなら DefaultCPURequest。limit は付けない (起動時の JVM を絞らない)。
+	CPURequest    resource.Quantity
 	MemoryRequest resource.Quantity
 	MemoryLimit   resource.Quantity
 	// ForwardingSecretName は Velocity modern forwarding の秘密を持つ Secret の名前 (キー ForwardingSecretKey)。
 	// 空なら DefaultForwardingSecretName。プロキシ (Gate) と同じ値でないとワールドに入れない。
 	ForwardingSecretName string
+}
+
+// DefaultCPURequest は Settings.CPURequest が空のときの CPU の request。
+const DefaultCPURequest = "200m"
+
+func (s Settings) cpuRequest() resource.Quantity {
+	if s.CPURequest.IsZero() {
+		return resource.MustParse(DefaultCPURequest)
+	}
+	return s.CPURequest
 }
 
 // ForwardingSecretName / Key の既定値。
@@ -285,6 +297,14 @@ func BuildDeployment(s Settings, info *schematic.Info, now time.Time) *appsv1.De
 					AutomountServiceAccountToken:  ptr.To(false),
 					EnableServiceLinks:            ptr.To(false),
 					TerminationGracePeriodSeconds: ptr.To[int64](15),
+					// ワールドをなるべく別々のノードに散らす。スケジューラーはイメージを持つノードを好むので、
+					// 指定しないと最初にイメージを取ったノードに偏る。収まらなければ同じノードにも置く。
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+						MaxSkew:           1,
+						TopologyKey:       corev1.LabelHostname,
+						WhenUnsatisfiable: corev1.ScheduleAnyway,
+						LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{LabelManagedBy: ValueManagedBy}},
+					}},
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:   ptr.To(true),
 						RunAsUser:      ptr.To[int64](UID),
@@ -345,7 +365,7 @@ func BuildDeployment(s Settings, info *schematic.Info, now time.Time) *appsv1.De
 						},
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("100m"),
+								corev1.ResourceCPU:    s.cpuRequest(),
 								corev1.ResourceMemory: s.MemoryRequest,
 							},
 							Limits: corev1.ResourceList{corev1.ResourceMemory: s.MemoryLimit},

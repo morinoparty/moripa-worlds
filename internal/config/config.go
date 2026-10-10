@@ -32,6 +32,7 @@ type Controller struct {
 	WorldImage         string
 	WorldSchematicsPVC string
 	WorldOriginY       int
+	WorldCPURequest    resource.Quantity
 	WorldMemoryRequest resource.Quantity
 	WorldMemoryLimit   resource.Quantity
 	// ForwardingSecretName はワールドの Pod に IANUA_VELOCITY_SECRET として渡す Secret の名前 (キー "secret")。
@@ -184,6 +185,7 @@ func LoadController(getenv func(string) string) (Controller, error) {
 		WorldImage:           l.required("WORLD_IMAGE"),
 		WorldSchematicsPVC:   l.str("WORLD_SCHEMATICS_PVC", "schematics"),
 		WorldOriginY:         l.integer("WORLD_ORIGIN_Y", 64, -2048),
+		WorldCPURequest:      l.quantity("WORLD_CPU_REQUEST", "200m"),
 		WorldMemoryRequest:   l.quantity("WORLD_MEMORY_REQUEST", "384Mi"),
 		WorldMemoryLimit:     l.quantity("WORLD_MEMORY_LIMIT", "768Mi"),
 		ForwardingSecretName: l.str("FORWARDING_SECRET_NAME", "worlds-forwarding"),

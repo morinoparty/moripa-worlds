@@ -242,7 +242,7 @@ func TestDeployment(t *testing.T) {
 	if c.ReadinessProbe.TCPSocket.Port.String() != "minecraft" || c.Ports[0].ContainerPort != 25565 {
 		t.Errorf("probe port = %s, container port = %d", c.ReadinessProbe.TCPSocket.Port.String(), c.Ports[0].ContainerPort)
 	}
-	if c.Resources.Requests.Cpu().String() != "100m" || c.Resources.Requests.Memory().String() != "384Mi" || c.Resources.Limits.Memory().String() != "768Mi" {
+	if c.Resources.Requests.Cpu().String() != DefaultCPURequest || c.Resources.Requests.Memory().String() != "384Mi" || c.Resources.Limits.Memory().String() != "768Mi" {
 		t.Errorf("resources = %+v", c.Resources)
 	}
 	if _, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
@@ -256,6 +256,21 @@ func TestDeployment(t *testing.T) {
 			sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 			t.Errorf("%s securityContext = %+v", ctr.Name, sc)
 		}
+	}
+
+	if got := c.Resources.Requests.Cpu().String(); got != DefaultCPURequest {
+		t.Errorf("cpu request = %s", got)
+	}
+	if _, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+		t.Errorf("cpu limit should not be set: %+v", c.Resources.Limits)
+	}
+	if len(pod.TopologySpreadConstraints) != 1 {
+		t.Fatalf("topologySpreadConstraints = %+v", pod.TopologySpreadConstraints)
+	}
+	tsc := pod.TopologySpreadConstraints[0]
+	if tsc.TopologyKey != corev1.LabelHostname || tsc.WhenUnsatisfiable != corev1.ScheduleAnyway || tsc.MaxSkew != 1 ||
+		tsc.LabelSelector.MatchLabels[LabelManagedBy] != ValueManagedBy || len(tsc.LabelSelector.MatchLabels) != 1 {
+		t.Errorf("topologySpreadConstraint = %+v", tsc)
 	}
 
 	ic := pod.InitContainers[0]
@@ -281,5 +296,14 @@ func TestDeploymentForwardingSecretName(t *testing.T) {
 	ref := d.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef
 	if ref.Name != "other-forwarding" || ref.Key != "secret" || ref.Optional != nil {
 		t.Fatalf("secretKeyRef = %+v", ref)
+	}
+}
+
+func TestDeploymentCPURequest(t *testing.T) {
+	s := testSettings()
+	s.CPURequest = resource.MustParse("500m")
+	d := BuildDeployment(s, testInfo(), time.Now())
+	if got := d.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu().String(); got != "500m" {
+		t.Errorf("cpu request = %s", got)
 	}
 }

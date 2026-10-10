@@ -34,7 +34,7 @@ func TestDefaults(t *testing.T) {
 	if c.S3Endpoint != "http://rustfs-svc.rustfs.svc.cluster.local:9000" || c.S3Region != "us-east-1" || c.S3Bucket != "moripa-utils" || c.S3Prefix != "schematics/" {
 		t.Errorf("s3 defaults: %+v", c)
 	}
-	if c.WorldSchematicsPVC != "schematics" || c.WorldOriginY != 64 || c.WorldMemoryRequest.String() != "384Mi" || c.WorldMemoryLimit.String() != "768Mi" || c.ForwardingSecretName != "worlds-forwarding" {
+	if c.WorldSchematicsPVC != "schematics" || c.WorldOriginY != 64 || c.WorldCPURequest.String() != "200m" || c.WorldMemoryRequest.String() != "384Mi" || c.WorldMemoryLimit.String() != "768Mi" || c.ForwardingSecretName != "worlds-forwarding" {
 		t.Errorf("world defaults: %+v", c)
 	}
 	if c.MaxWorlds != 6 || c.IdleTimeout != 10*time.Minute || c.UnjoinedTimeout != 3*time.Minute || c.StartupTimeout != 5*time.Minute || c.SweepInterval != time.Hour || !c.DeleteExpired || c.LogLevel != slog.LevelInfo {

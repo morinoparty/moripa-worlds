@@ -190,6 +190,7 @@ info.json があるが内容が不正なディレクトリ (期限が分から�
 | `WORLD_IMAGE` | (必須) | 例: `ghcr.io/morinoparty/ianua-silvae:main@sha256:…` |
 | `WORLD_SCHEMATICS_PVC` | `schematics` | `moripa-utils/schematics` を読み取り専用でマウントする PVC |
 | `WORLD_ORIGIN_Y` | `64` | schematic を貼り付ける Y |
+| `WORLD_CPU_REQUEST` | `200m` | ワールドの CPU の request (limit は付けない) |
 | `WORLD_MEMORY_REQUEST` / `WORLD_MEMORY_LIMIT` | `384Mi` / `768Mi` | ワールドのメモリ |
 | `FORWARDING_SECRET_NAME` | `worlds-forwarding` | ワールドの Pod に `IANUA_VELOCITY_SECRET` として渡す Secret (キー `secret`) |
 | `MAX_WORLDS` | `6` | 同時に存在できるワールドの数 (既存の `w-*` Deployment を数える) |
