@@ -11,7 +11,7 @@ require (
 	github.com/robinbraemer/event v0.1.1
 	go.minekube.com/common v0.4.0
 	go.minekube.com/gate v0.74.32
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/time v0.16.0
 	k8s.io/api v0.35.9
 	k8s.io/apimachinery v0.35.9
